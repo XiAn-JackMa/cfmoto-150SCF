@@ -101,8 +101,9 @@ final class CfMotoOutput {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard let self, self.lock.withLock({ self.link != nil }) else { return }
-                let text = "\(self.lastState) · \(self.source.counters)"
-                DispatchQueue.main.async { self.onState?(text) }
+                // The card flickered because it was rewritten every few seconds while the link
+                // reconnected. Counters belong in the log, which is stable and copyable.
+                self.onLog?("CFMOTO \(self.lastState) | \(self.source.counters)")
             }
         }
         link.start()

@@ -48,6 +48,16 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var paramSets = 0      // SPS/PPS absorbed from the stream
     /// `parameters` is mutated on the work queue; this flag is the lock-protected view of it.
     private var parametersReady = false
+    /// Throttles per-frame diagnostics so a stalled pipeline says why once, not 30 times a second.
+    private var lastDiagnostic = -Double.infinity
+
+    /// Logs at most once every two seconds.
+    private func diagnose(_ message: @autoclosure () -> String) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastDiagnostic >= 2 else { return }
+        lastDiagnostic = now
+        log?("CFMOTO \(message())")
+    }
 
     var counters: String {
         lock.lock(); defer { lock.unlock() }
@@ -128,7 +138,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         let needIDR = skipping
         lock.unlock()
         if needIDR { onKeyframeRequest?() }
-        guard !reject else { return }
+        guard !reject else { diagnose("input dropped by backpressure (pending=\(pending))"); return }
 
         work.async { [weak self] in
             guard let self else { return }
@@ -141,9 +151,16 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         lock.lock(); let alive = !stopped; let canvas = self.canvas; lock.unlock()
         guard alive, let canvas else { return }
 
-        guard let image = decode(data, keyframe: keyframe) else { return }
+        guard let image = decode(data, keyframe: keyframe) else {
+            let waiting = lock.withLock { waitingForIDR }
+            diagnose("decode returned nil (keyframe=\(keyframe) waitingIDR=\(waiting) sps=\(paramSets))")
+            return
+        }
         lock.lock(); decodedCount += 1; lock.unlock()
-        guard let frame = encode(image, canvas: canvas) else { return }
+        guard let frame = encode(image, canvas: canvas) else {
+            diagnose("encode returned nil")
+            return
+        }
         lock.lock(); encodedCount += 1; lock.unlock()
 
         lock.lock()
@@ -200,7 +217,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             waitingForIDR = true
             lock.unlock()
             lastCodecFailure = ProcessInfo.processInfo.systemUptime
-            log?("CFMOTO decode failed: \(error.localizedDescription)")
+            diagnose("decode failed: \(error.localizedDescription)")
             onKeyframeRequest?()
             return nil
         }
@@ -259,7 +276,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             waitingForIDR = true
             lock.unlock()
             lastCodecFailure = ProcessInfo.processInfo.systemUptime
-            log?("CFMOTO encode failed: \(error.localizedDescription)")
+            diagnose("encode failed: \(error.localizedDescription)")
             return nil
         }
     }
