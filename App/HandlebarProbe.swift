@@ -8,9 +8,13 @@
 // its CLIENT_INFO reports supportScreenTouch=false) ▲▼ arrive as absolute-volume steps rather than
 // key events.
 //
-// This file only OBSERVES. It registers the remote commands, watches outputVolume, and reports every
-// raw event; no mapping to CarPlay controls happens here, because the 150SCF's firmware is not
-// documented and guessing would hide the very thing we need to measure. Read the log, then map.
+// Measured on a 150SCF (probe run, 2026-11-23), which is why the mapping below looks like this:
+//   ▲▼        absolute-volume steps, one press = 0.05; a fast double is merged by the firmware into
+//             one 0.10 step, so a double is only visible as a bigger jump.
+//   enter     togglePlayPauseCommand (sometimes a bare next/previous arrives instead).
+//   holds     none: the dash never sends seek/FAST_FORWARD, so no key has a real press/release pair.
+// So ▲▼ turn the wheel, a merged double steps once and then goes Back (a way out of a screen), enter
+// selects with a timed hold for Home, and a bare track key is treated as the same notch.
 
 import AVFoundation
 import Foundation
@@ -30,6 +34,19 @@ final class HandlebarProbe: @unchecked Sendable {
     /// Called on the main thread for every observed event.
     var onSample: ((HandlebarRawSample) -> Void)?
     var onLog: ((String) -> Void)?
+    /// When set, raw events are also turned into CarPlay controls. Nil = observe only.
+    var onControl: ((CarPlayControl) -> Void)?
+
+    /// What the bike actually sends, measured on a 150SCF (see the class comment):
+    /// ▲▼ = absolute-volume steps, enter = togglePlayPause (and sometimes a bare next/previous),
+    /// no seek events at all, so there is no server-side hold.
+    private let doubleTapWindow: TimeInterval = 0.55
+    private let selectHoldDelay: TimeInterval = 0.60
+    private var lastVolumeStep: (direction: Int, at: Date)?
+    private var selectDown: Date?
+    private var selectHoldTimer: Timer?
+    private var selectFired: [(tap: Date, action: CarPlayControl)] = []
+    private var lastSelectAt: Date?
 
     private let lock = NSLock()
     private var samples: [HandlebarRawSample] = []
@@ -103,11 +120,26 @@ final class HandlebarProbe: @unchecked Sendable {
             commandTargets.append((command, target))
         }
 
-        add(center.playCommand, "playCommand")
-        add(center.pauseCommand, "pauseCommand")
-        add(center.togglePlayPauseCommand, "togglePlayPauseCommand")
-        add(center.nextTrackCommand, "nextTrackCommand")
-        add(center.previousTrackCommand, "previousTrackCommand")
+        center.playCommand.isEnabled = true
+        commandTargets.append((center.playCommand, center.playCommand.addTarget { [weak self] _ in
+            self?.record("playCommand"); self?.handleSelect(); return .success
+        }))
+        center.pauseCommand.isEnabled = true
+        commandTargets.append((center.pauseCommand, center.pauseCommand.addTarget { [weak self] _ in
+            self?.record("pauseCommand"); self?.handleSelect(); return .success
+        }))
+        center.togglePlayPauseCommand.isEnabled = true
+        commandTargets.append((center.togglePlayPauseCommand, center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            self?.record("togglePlayPauseCommand"); self?.handleSelect(); return .success
+        }))
+        center.nextTrackCommand.isEnabled = true
+        commandTargets.append((center.nextTrackCommand, center.nextTrackCommand.addTarget { [weak self] _ in
+            self?.record("nextTrackCommand"); self?.handleTrack(forward: true); return .success
+        }))
+        center.previousTrackCommand.isEnabled = true
+        commandTargets.append((center.previousTrackCommand, center.previousTrackCommand.addTarget { [weak self] _ in
+            self?.record("previousTrackCommand"); self?.handleTrack(forward: false); return .success
+        }))
 
         // Seek commands are how a long press usually surfaces; without them a hold looks like a tap.
         center.skipForwardCommand.isEnabled = true
@@ -159,7 +191,65 @@ final class HandlebarProbe: @unchecked Sendable {
             let steps = abs(new - old)
             self?.record(new > old ? "音量+" : "音量−",
                          String(format: "%.2f → %.2f（%.3f，约 %d 格）", old, new, steps, Int((steps * 16).rounded())))
+            self?.handleVolume(direction: new > old ? 1 : -1, steps: steps)
         }
+    }
+
+    // MARK: - Raw events → CarPlay controls
+
+    /// ▲/▼ arrive as volume steps, so: one step = one notch of the wheel, and a firmware-merged
+    /// double (the measured 0.10 jump) = one notch plus a Back, which gives the rider a way out of a
+    /// screen without moving their thumb to another button.
+    private func handleVolume(direction: Int, steps: CGFloat) {
+        guard onControl != nil else { return }
+        let now = Date()
+        if steps >= 0.075 {
+            onControl?(.knobNext)
+            onControl?(.back)
+            lastVolumeStep = nil
+            return
+        }
+        onControl?(direction > 0 ? .knobPrevious : .knobNext)
+        lastVolumeStep = (direction, now)
+    }
+
+    /// Enter is a discrete play/pause event with no release, so a hold has to be timed: fire after
+    /// `selectHoldDelay` if nothing indicates a release, and treat a press inside the double-tap
+    /// window as a double instead of a second single.
+    private func handleSelect() {
+        guard onControl != nil else { return }
+        let now = Date()
+        if let last = selectFired.last, now.timeIntervalSince(last.tap) < doubleTapWindow {
+            selectHoldTimer?.invalidate(); selectHoldTimer = nil
+            selectDown = nil
+            selectFired.removeAll()
+            onControl?(.back)
+            return
+        }
+        selectDown = now
+        selectHoldTimer?.invalidate()
+        selectHoldTimer = Timer.scheduledTimer(withTimeInterval: selectHoldDelay, repeats: false) { [weak self] _ in
+            guard let self, self.selectDown != nil else { return }
+            self.selectDown = nil
+            self.selectFired.removeAll()
+            self.onControl?(.home)
+        }
+        // A single settles quickly instead of waiting out the whole window: the dash's enter is
+        // usually a deliberate press, and 550 ms of lag on every select would be felt.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self, self.selectDown != nil else { return }
+            self.selectDown = nil
+            self.selectHoldTimer?.invalidate(); self.selectHoldTimer = nil
+            self.selectFired.append((Date(), .select))
+            self.onControl?(.select)
+        }
+    }
+
+    /// The firmware sometimes sends a bare track key with no volume step. Treat it as the same
+    /// notch, so a press never gets lost.
+    private func handleTrack(forward: Bool) {
+        guard onControl != nil else { return }
+        onControl?(forward ? .knobNext : .knobPrevious)
     }
 
     // MARK: - Now Playing claim (what makes the keys arrive at all)

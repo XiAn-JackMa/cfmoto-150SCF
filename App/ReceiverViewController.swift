@@ -728,6 +728,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             DispatchQueue.main.async { self.appendHandlebarLine(line) }
             self.log(line)
         }
+        // Once the probe holds Now Playing, its events also drive CarPlay.
+        handlebarProbe.onControl = { [weak self] control in self?.receiver.press(control) }
         receiverBrowser.onLog = { [weak self] in self?.log($0) }
         receiverBrowser.onTargets = { [weak self] targets in
             guard let self, !self.running, self.modeControl.selectedSegmentIndex == 2 else { return }
