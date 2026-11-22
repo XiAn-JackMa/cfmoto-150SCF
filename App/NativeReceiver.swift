@@ -53,6 +53,9 @@ final class NativeReceiver {
     var onNinebotState: ((String) -> Void)?
     private let tailing = TailingOutput()
     var onTailingState: ((String) -> Void)?
+    /// EasyConn output to a CFMOTO / Carbit dashboard.
+    private let cfmoto = CfMotoOutput()
+    var onCfMotoState: ((String) -> Void)?
     private lazy var carLink = CarLinkRelay(queue: queue)
     var onCarLifeState: ((String) -> Void)?
     var onCarLinkState: ((String) -> Void)?
@@ -116,6 +119,15 @@ final class NativeReceiver {
                     model: "iPhone", systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                     width: configuration.width, height: configuration.height, rotation: 1)
                 self.tailing.start(localAddress: configuration.address, targetAddress: target, phone: phone)
+            }
+            if let target = configuration.cfmotoAddress {
+                self.cfmoto.onLog = { [weak self] in self?.log($0) }
+                self.cfmoto.onState = { [weak self] in self?.onCfMotoState?($0) }
+                self.cfmoto.onKeyframeRequest = { [weak self] in
+                    self?.requestKeyFrame(reason: "CFMOTO 解码恢复")
+                }
+                self.cfmoto.start(localAddress: configuration.address, targetAddress: target,
+                                  port: configuration.cfmotoPort)
             }
             if configuration.carLifeEnabled {
                 self.carLife.onLog = { [weak self] in self?.log($0) }
@@ -322,6 +334,7 @@ final class NativeReceiver {
         zeeho.stop()
         ninebot.stop()
         tailing.stop()
+        cfmoto.stop()
         carLink.stop()
         #if DEBUG
         diagnosticStarted = ProcessInfo.processInfo.systemUptime
@@ -418,6 +431,7 @@ final class NativeReceiver {
                     if configuration.zeehoAddress != nil { self.zeeho.append(data, codec: codec, keyframe: keyframe) }
                     if configuration.ninebotAddress != nil { self.ninebot.append(data, codec: codec, keyframe: keyframe) }
                     if configuration.tailingAddress != nil { self.tailing.append(data, codec: codec) }
+                    if configuration.cfmotoAddress != nil { self.cfmoto.append(data, codec: codec, keyframe: keyframe) }
                     if configuration.carLifeEnabled { self.carLife.append(data, codec: codec) }
                     if configuration.carLinkRelayAddress != nil { self.carLink.append(data, codec: codec) }
                     if self.localSkipping {

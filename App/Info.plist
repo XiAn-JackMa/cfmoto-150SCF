@@ -32,6 +32,7 @@
 		<string>_airplay._tcp</string>
 		<string>_tds-carkit._tcp</string>
 		<string>_carplay-ctrl._tcp</string>
+		<string>_EasyConn._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>CarWithin 需要访问本地网络，以接收 CarPlay 音视频，并在你选择时把画面或声音发送给局域网接收设备。</string>

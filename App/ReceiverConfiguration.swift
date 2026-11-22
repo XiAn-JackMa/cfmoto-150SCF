@@ -27,6 +27,10 @@ struct ReceiverConfiguration {
     /// Head unit IPv4 for CarLife discovery; nil sweeps the local network.
     var carLifeAddress: String?
     var zeehoAddress: String?
+    /// EasyConn ("MotoPlay") dashboard IPv4 for the CFMOTO output; nil disables it.
+    var cfmotoAddress: String?
+    /// EasyConn EC service port. The CFMOTO T-Box answers its probe on 10930.
+    var cfmotoPort: String = "10930"
     var ninebotAddress: String?
     var tailingAddress: String?
     var tailingPhoneInfo: TailingPhoneInfo?
@@ -165,6 +169,17 @@ struct ReceiverConfiguration {
                   !tailingAddress.hasPrefix("127."), !tailingAddress.hasPrefix("0."),
                   UInt32(bigEndian: target.s_addr) < 0xe0000000 else {
                 throw ConfigurationError("请输入有效的台铃仪表 IPv4 地址，与本机 IP 不同。")
+            }
+        }
+        if let cfmotoAddress {
+            var target = in_addr()
+            guard inet_pton(AF_INET, cfmotoAddress, &target) == 1, cfmotoAddress != address,
+                  !cfmotoAddress.hasPrefix("127."), !cfmotoAddress.hasPrefix("0."),
+                  !cfmotoAddress.hasPrefix("169.254."), UInt32(bigEndian: target.s_addr) < 0xe0000000 else {
+                throw ConfigurationError("请输入有效的春风车机 EasyConn IPv4 地址（通常是热点网关，如 192.168.0.1），且与本机 IP 不同。")
+            }
+            guard let port = Int(cfmotoPort), (1...65535).contains(port) else {
+                throw ConfigurationError("EasyConn 端口需为 1-65535，春风车机默认 10930。")
             }
         }
         if let carLinkRelayAddress {

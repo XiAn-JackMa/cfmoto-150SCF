@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// EasyConn ("MotoPlay") output: CarPlay → a CFMOTO / Carbit motorcycle dashboard.
+//
+// The protocol engine is OpenCfMotoCore (vendored under Sources/OpenCfMotoCore), which is the same
+// code that is known to work on a CFMOTO 150SC: PXC handshake on 10922, media control on 10921,
+// pulled H.264 on 10920, RSA HUID in the CLIENT_INFO reply. Everything here is wiring.
+//
+// Profile: CFDL16 / "legacy" is the 150SC (BikeProfileID.legacy). The cap with the canvas comes from
+// the dash itself in REQ_RV_DATA_START (16), so no size is hard-coded.
+
+import Foundation
+
+final class CfMotoOutput {
+    /// Lifecycle text for the settings screen and the log.
+    var onState: ((String) -> Void)?
+    var onLog: ((String) -> Void)?
+    /// CarPlay must produce a fresh keyframe (the dash's decoder resynchronised).
+    var onKeyframeRequest: (() -> Void)?
+
+    private let source = CfMotoVideoSource()
+    private let lock = NSLock()
+    private var link: EasyConnLink?
+    private var pump: Task<Void, Never>?
+    /// RSA identity for CLIENT_INFO. Kept for the process lifetime: a fresh key per launch is fine
+    /// for a test build, but it means the dash sees a new accessory on every start.
+    private var signer: PureSwiftHuidSigner?
+
+    init() {
+        source.log = { [weak self] in self?.onLog?($0) }
+        source.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?() }
+    }
+
+    func start(localAddress: String, targetAddress: String, port: String) {
+        stop()
+
+        let signer: PureSwiftHuidSigner
+        if let existing = self.signer {
+            signer = existing
+        } else {
+            signer = PureSwiftHuidSigner.generate(bits: 1024)
+            self.signer = signer
+        }
+
+        let dash = targetAddress.trimmingCharacters(in: .whitespaces)
+        let configuration = LinkConfiguration(
+            qr: nil,
+            profileOverride: .legacy,
+            learnedCanvas: nil,
+            forceTouchscreen: false,
+            phone: PhoneIdentity(phoneBrand: "Apple", phoneModel: "iPhone",
+                                 phoneOsVersion: "35", bluetoothName: "OpenXPlay"),
+            localHost: localAddress.isEmpty ? nil : localAddress,
+            dashHost: dash.isEmpty ? nil : dash,
+            connectBackTimeout: 10,
+            stallTimeout: 8,
+            stallReconnectCooldown: 20,
+            maxReconnectAttempts: 20,
+            framePullTimeout: 3)
+
+        // No Bonjour browser: the T-Box is the access point, so the Wi-Fi gateway is the dash. That
+        // also avoids the mDNS permissions the browser would need.
+        let link = EasyConnLink(configuration: configuration,
+                                network: POSIXNetworkProvider(),
+                                frameSource: source,
+                                signer: signer,
+                                discovery: nil,
+                                gateway: dash.isEmpty ? nil : dash)
+        lock.lock(); self.link = link; lock.unlock()
+
+        onLog?("CFMOTO EasyConn → \(dash.isEmpty ? "gateway" : dash):\(port) profile=legacy")
+        onState?("正在连接春风车机…")
+
+        pump = Task { [weak self] in
+            for await event in link.events {
+                guard let self else { return }
+                self.onLog?("CFMOTO event: \(String(describing: event))")
+                self.onState?(Self.describe(event))
+            }
+        }
+        link.start()
+    }
+
+    func append(_ data: Data, codec: VideoCodec, keyframe: Bool) {
+        guard lock.withLock({ link != nil }) else { return }
+        source.append(data, codec: codec, keyframe: keyframe)
+    }
+
+    func stop() {
+        pump?.cancel(); pump = nil
+        lock.lock()
+        let current = link
+        link = nil
+        lock.unlock()
+        current?.stop()
+        source.shutdown()
+    }
+
+    private static func describe(_ event: LinkEvent) -> String {
+        let text = String(describing: event)
+        if text.localizedCaseInsensitiveContains("streaming") { return "正在投屏 · 车机已连接" }
+        if text.localizedCaseInsensitiveContains("handshak") { return "已找到车机，握手中…" }
+        if text.localizedCaseInsensitiveContains("fail") || text.localizedCaseInsensitiveContains("error") {
+            return "连接失败：\(text)"
+        }
+        return text
+    }
+}
