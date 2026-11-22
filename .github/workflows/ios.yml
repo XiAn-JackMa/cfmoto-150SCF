@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Builds CarWithin on GitHub's macOS runners and uploads an UNSIGNED .ipa.
+#
+# Signing deliberately stays off this machine: the runner has neither the developer account nor the
+# device, so `CODE_SIGNING_ALLOWED=NO` produces an unsigned bundle and the IPA is signed locally
+# with Sideloadly (or any tool) against the rider's own Apple ID.
+#
+# No Apple accessory (MFi) identity is needed to build: CarPlay identity is imported into the app
+# after it is installed. Never commit identity material — .gitignore already excludes it.
+
+name: build-ipa
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    # macos-15 ships Xcode 16 (iOS 18 SDK), which satisfies the iOS 17 platform requirement.
+    runs-on: macos-15
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          set -eux
+          xcodebuild -version
+          xcodebuild -showsdks | sed -n '1,40p'
+          xcodebuild -list -project TDSCarKit.xcodeproj
+
+      - name: Build (unsigned)
+        run: |
+          set -euxo pipefail
+          xcodebuild \
+            -project TDSCarKit.xcodeproj \
+            -scheme TDSCarKit \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            | tee build.log
+
+      - name: Package unsigned IPA
+        run: |
+          set -euxo pipefail
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          test -n "$APP"
+          mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          # The signing tool replaces/creates these; an unsigned bundle must not carry them.
+          rm -rf out/Payload/*.app/_CodeSignature out/Payload/*.app/embedded.mobileprovision || true
+          cd out
+          zip -qry CarWithin-unsigned.ipa Payload
+          ls -lh CarWithin-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: CarWithin-unsigned
+          path: out/CarWithin-unsigned.ipa
+          if-no-files-found: error
+
+      # Build logs are what makes a red run diagnosable without a Mac.
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: warn
