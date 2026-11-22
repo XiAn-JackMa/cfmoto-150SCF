@@ -1,0 +1,1346 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Ported from OpenCfMoto (Android) GpxDashUi.kt (UI state machine, camera policy, focus engine,
+// tap handlers) — docs/spec/navigation-dash.md §4.9, §11; input-controls.md §6.
+//
+// The dash UI controller: the app feeds a `DashModel` (navigation snapshot, fix, prefs, places…)
+// and `DashInput`s (dash touches, handlebar keys/knob); the controller owns the UI state (sheets,
+// focus, camera, toasts, scroll offsets), produces a `DashDisplayList` per frame for the renderer
+// and reports `DashIntent`s for the app to perform.
+//
+// Thread-safety: final class guarded by an NSLock (`@unchecked Sendable`); every public method
+// may be called from any thread (the render loop calls `displayList(now:)` on its own queue).
+// `now` values must come from one monotonic clock (the same as `DashTouch.time`).
+//
+// Smooth follow (iOS addition, DashFollowEase.swift): `update(_:)` moves the TARGET camera / puck
+// (`state.camera`, `mapProjection()`), exactly like osmdroid's jump; what `displayList(now:)` draws
+// then eases from the previous picture to the targets over `Options.followEaseDuration` (0.35 s,
+// started by the first call that knows the time). A running ease changes the list on every call,
+// so the projection engine renders at its frame cap only while it runs; once it is over the list
+// is identical frame after frame. `mapProjection(now:)` / `visibleTiles(now:)` / `isAnimating(now:)`
+// describe what is drawn at `now`. Explicit camera actions never ease.
+//
+// Integration recipe (app layer):
+//   let ui = DashUIController(measurer: CoreTextMeasurer())        // same measurer as the renderer
+//   render loop (≥ 1 Hz, typically at the frame cap):
+//       ui.update(model)                                           // NavSnapshot, fix, prefs, places…
+//       perform(ui.tick(now: clock.now()))                         // long-press / auto-recenter / toasts
+//       renderer.draw(ui.displayList(now: clock.now()))
+//   dash touch (after GhostTouchFilter):  perform(ui.handle(.touch(t), now: t.time))
+//   handlebar ButtonAction:               DashInput(buttonAction: a).map { perform(ui.handle($0, now:)) }
+//   NavEffect.toast(text):                ui.showToast(text, now:)
+//   going to background:                  encode ui.displayList(forHoldScreen: nil, now:) as an IDR
+// where `perform` executes the returned `DashIntent`s (UI-only ones are already applied).
+
+import Foundation
+
+/// Read-only snapshot of the UI state (for the app / phone preview / tests).
+public struct DashUIState: Sendable, Equatable {
+    public var sheet: DashSheet
+    public var camera: DashCamera
+    public var focusedId: String?
+    /// Current handlebar focus order (top-most interactive layer).
+    public var focusOrder: [String]
+    /// Toast currently shown (transient or the model's persistent text).
+    public var toast: String?
+    /// Bearing the puck is drawn with (degrees).
+    public var puckBearingDeg: Double
+    public var menuScroll: Double
+    public var searchListScroll: Double
+}
+
+public final class DashUIController: @unchecked Sendable {
+    /// Behaviour switches. Defaults = the iOS fixes recommended by the spec; set the flags to
+    /// false for Android parity.
+    public struct Options: Sendable, Equatable {
+        /// Fix (h): restore follow / heading-up / speed-zoom when a preview is cancelled.
+        public var restoreCameraAfterPreview = true
+        /// Fix (f): a map pan / pinch / double-tap is a free pan (follow off, recenter after 12 s).
+        public var panStopsFollow = true
+        /// §4.9 / R9: cap the look-ahead so the puck stays above the bottom cards.
+        public var clampLookAheadToVisibleMap = true
+        /// Fix (i): the "Lap" pill label is part of the handlebar focus order.
+        public var lapReachableByHandlebar = true
+        /// The menu's settings segments are part of the handlebar focus order (Android: unreachable).
+        public var handlebarReachesSettings = true
+        /// After a touch, hide the focus ring for this long (until the next handlebar input); nil = always shown.
+        public var hideFocusRingAfterTouch: TimeInterval? = 5
+        /// Lifetime of transient toasts (`showToast`, UI feedback).
+        public var toastDuration: TimeInterval = 2.5
+        /// Feedback toasts for UI-only actions ("Centered on GPS", "Heading up"…) — iOS addition,
+        /// Android's status line is hidden on landscape dashes.
+        public var feedbackToasts = true
+        /// Smooth follow (iOS addition, navigation-dash.md §4.9 / §15.3): when a fix, bearing or speed
+        /// zoom moves the follow camera, the drawn centre (incl. look-ahead), rotation, zoom AND the
+        /// rider puck ease from what is on screen to the new targets (cubic ease-out) over this many
+        /// seconds; a fix while not following glides the puck only. Android's MapLibre phone map eases
+        /// 280 ms; 0 = jump on every fix (osmdroid bike parity). Explicit camera actions (recenter,
+        /// overview / preview fits, zoom buttons, pan / pinch / double tap, free-pan recenter) jump.
+        public var followEaseDuration: TimeInterval = 0.35
+        /// iOS addition (music): close the Music sheet after this long without dash input while the bike
+        /// moves (`model.fix?.isMoving ?? true`: no fix counts as moving); nil = never.
+        public var musicSheetIdleTimeout: TimeInterval? = 10
+        /// iOS addition (music): while navigating, close the Music sheet when the next turn
+        /// (`model.nav.progress?.upcomingTurn.distanceFromRiderM`) is within this distance — once per turn
+        /// index, and only ≥ `musicSheetInputGrace` after the last dash input; nil = never.
+        public var musicSheetTurnDistanceM: Double? = 200
+        public var musicSheetInputGrace: TimeInterval = 3
+        /// iOS addition (music, review R3-FOCUS-1): an open Music sheet outlasts a song that goes away for at
+        /// most this long (no item between two songs for longer than the app's own hold, a paused song the
+        /// app hid for another app's sound that stopped at once), still drawn with the song it showed;
+        /// `tick` closes it (`.musicGone`) when the song stays gone. nil = it closes at once. Review R4-FOCUS-2:
+        /// what the rider reaches from the held sheet meanwhile shows that song too — the menu HOME opens (its
+        /// "Music"), the tile BACK / ✕ close onto, ★ there re-opens the held sheet — so every press means what it
+        /// would mean with the song; when the hold ends they go as F2 says.
+        public var musicSheetVanishGrace: TimeInterval? = 2
+        /// P0 (D01): the confirm card ("End the route?", "Change route?") closes by itself — committing nothing,
+        /// like its safe option — after this long without dash input; nil = never.
+        public var confirmIdleTimeout: TimeInterval? = 8
+        public init() {}
+    }
+
+    public let options: Options
+    private let measurer: any DashTextMeasurer
+    private let lock = NSLock()
+
+    private var model = DashModel()
+    private var hasModel = false
+    private var sheet: DashSheet = .none
+    private var camera = DashCamera()
+    private var focus = DashFocusEngine()
+    private var pendingPreference: DashFocusPreference? = .default
+    private var gestures = DashGestureRecognizer()
+    private var puckBearing: Double = 0
+    private var menuScroll = 0.0
+    private var searchListScroll = 0.0
+    private var searchChipScroll = 0.0
+    private var previewChipScroll = 0.0
+    private var toast: (text: String, until: TimeInterval)?
+    private var lastTouchAt: TimeInterval?
+    private var lastKeyAt: TimeInterval?
+    private var savedCamera: (follow: Bool, headingUp: Bool, speedZoom: Bool)?
+    private var scene: DashScene?
+    /// Scroll the focused control into view at the next scene build (set by focus moves).
+    private var revealFocus = false
+    /// The running follow ease (nil: the targets are drawn as they are).
+    private var ease: DashFollowEase?
+    /// An explicit camera move happened inside the current `update` (fits, restore, navigation start…): no ease.
+    private var cameraJumped = false
+    /// Latest `now` seen (monotonic): the time Apple Music progress is drawn for.
+    private var lastNow: TimeInterval?
+    /// Last dash input while the Music sheet is open (or its opening): the idle / near-turn rules.
+    private var musicActivityAt: TimeInterval = 0
+    /// The upcoming turn (index) the Music sheet already closed for — or that was already near when it
+    /// opened: closed once per turn.
+    private var musicTurnHandled: Int?
+    /// R2-DASH-1: the Music control a vanish took the focus from (`music.tile` for the tile and the sheet's
+    /// controls, or `menu.music`) and where it was parked. When the control is listed again and the focus is
+    /// still parked there, the focus goes back. The rider's ★★ meant for the tile (open the sheet, then ⏯)
+    /// must never reach the menu's End. Any dash input drops it.
+    private var musicFocusReturn: (id: String, parkedOn: String)?
+    /// Blind-input safety: the stand-in (one of `DashFocusEngine.musicGoneIds`) a vanished Music control
+    /// parked the focus on, while the focus rests there. Unlike `musicFocusReturn` it survives ★ on it (on
+    /// Recenter ★ only recenters; on Circuit it closes the menu onto the tile, else Recenter, parked
+    /// again); moving the focus drops it.
+    private var musicFocusParkedOn: String?
+    /// R3-FOCUS-1: the song the open Music sheet still shows while `model.music` is nil, and since when
+    /// (`Options.musicSheetVanishGrace`). Closed, the sheet would hand the knob back to the tile, where the
+    /// rider's next blind ▶ ★ (meant for ⏭) wraps to End. R4-FOCUS-2: the hold outlives the sheet for the same
+    /// grace (`shownMusic`): HOME's menu without "Music" parked the knob on Circuit, whose ◀ ★ is Record, and a
+    /// sheet closed onto the parked Recenter turned ◀ ★ into End.
+    private var musicHeld: (music: DashNowPlaying, since: TimeInterval)?
+    /// P0 (D01): what the open confirm card asks (meaningful while `sheet == .confirm`) and the last dash input
+    /// since it opened (`Options.confirmIdleTimeout`).
+    private var confirmKind: DashConfirmKind?
+    private var confirmActivityAt: TimeInterval = 0
+
+    public init(measurer: any DashTextMeasurer = ApproximateTextMeasurer(), options: Options = Options()) {
+        self.measurer = measurer
+        self.options = options
+    }
+
+    // MARK: - Public API
+
+    /// Feeds the latest model (call on every change or every frame). Detects preview /
+    /// navigation / arrival transitions (camera + focus policies) and applies the follow camera.
+    public func update(_ newModel: DashModel) {
+        lock.lock(); defer { lock.unlock() }
+        let prev = hasModel ? model : DashModel(canvas: newModel.canvas)
+        let shownBefore = hasModel ? shownView() : nil // what the last frame showed
+        let cameraBefore = camera
+        model = newModel
+        hasModel = true
+        cameraJumped = false
+        gestures.config = .scaled(newModel.scale)
+        transitions(from: prev, to: newModel)
+        if camera.follow && !newModel.inPreview {
+            applyFollowCamera()
+        } else {
+            puckBearing = currentBearing()
+        }
+        if !camera.isPositioned { positionIfNeeded() }
+        let canvasChanged = prev.canvas != newModel.canvas || prev.margins != newModel.margins
+            || prev.tileSize != newModel.tileSize
+        retarget(from: shownBefore, cameraMoved: !camera.hasSameGeometry(as: cameraBefore), jump: cameraJumped || canvasChanged)
+        scene = nil
+    }
+
+    /// Handles one input. Returns the intents to perform (UI-only ones are already applied).
+    public func handle(_ input: DashInput, now: TimeInterval) -> [DashIntent] {
+        lock.lock(); defer { lock.unlock() }
+        advance(now)
+        // P0 (D17): the hold picture shows no controls — keys, the knob and touches act on nothing.
+        if model.holdMessage != nil { return [] }
+        musicFocusReturn = nil // the rider acted on what the dash showed: no jump afterwards
+        if sheet == .music { musicActivityAt = max(musicActivityAt, now) } // any dash input keeps it open
+        if sheet == .confirm { confirmActivityAt = max(confirmActivityAt, now) }
+        switch input {
+        case let .touch(t):
+            lastTouchAt = now
+            let sc = ensureScene()
+            let p = DashPoint(min(max(0, Double(t.x)), max(0, model.canvas.width - 1)),
+                              min(max(0, Double(t.y)), max(0, model.canvas.height - 1)))
+            let events = gestures.process(t, point: p, now: now, hitTest: { self.hitTarget($0, sc) })
+            return apply(events, now: now)
+        case let .key(k):
+            lastKeyAt = now
+            return handleKey(k, now: now)
+        case let .knob(d):
+            lastKeyAt = now
+            moveFocus(d)
+            return []
+        case let .savedPlace(slot):
+            return [.navigateSavedPlace(slot)]
+        }
+    }
+
+    /// Timers: long-press (450 ms), free-pan auto-recenter (12 s), toast expiry, the Music sheet's
+    /// auto-close (idle while moving, near the next turn). Call ~10×/s (e.g. from the render loop);
+    /// returns intents fired by timers (a long-press `dropPin`, `closeSheets` for the Music sheet).
+    public func tick(now: TimeInterval) -> [DashIntent] {
+        lock.lock(); defer { lock.unlock() }
+        advance(now)
+        let events = gestures.tick(now: now)
+        var out = events.isEmpty ? [] : apply(events, now: now)
+        // R3-FOCUS-1: a song that stayed gone through `musicSheetVanishGrace` closes the sheet as F2 says.
+        let holdOver = now - (musicHeld?.since ?? -.infinity) >= (options.musicSheetVanishGrace ?? 0)
+        let vanished = sheet == .music && model.music == nil && holdOver
+        if sheet != .music, musicHeld != nil, model.music == nil, holdOver {
+            // R4-FOCUS-2: the held song leaves the menu or the tile the rider reached from the sheet; F2 parks a
+            // focus they had.
+            musicHeld = nil
+            scene = nil
+        }
+        if vanished || musicSheetShouldClose(now: now) {
+            musicHeld = nil
+            sheet = .none
+            pendingPreference = vanished ? .musicGone : .musicTile
+            scene = nil
+            out.append(.closeSheets)
+        }
+        // P0 (D01): an unanswered confirm card closes by itself and commits nothing.
+        if sheet == .confirm, let timeout = options.confirmIdleTimeout, now - confirmActivityAt >= timeout {
+            out += closeConfirm()
+        }
+        return out
+    }
+
+    /// Closes the confirm card as its safe option does: nothing is ended or replaced.
+    private func closeConfirm() -> [DashIntent] {
+        guard sheet == .confirm else { return [] }
+        sheet = .none
+        confirmKind = nil
+        pendingPreference = DashFocusEngine.defaultPreference(inPreview: model.inPreview, navigating: model.navigating)
+        scene = nil
+        return [.closeSheets]
+    }
+
+    /// The Music sheet's safety rules (navigation stays primary): 10 s without dash input while the
+    /// bike moves (or has no fix) — it stays open while stopped; while navigating, the next turn
+    /// within 200 m (once per turn, never within 3 s of an input).
+    private func musicSheetShouldClose(now: TimeInterval) -> Bool {
+        guard sheet == .music else { return false }
+        let idle = now - musicActivityAt
+        if let timeout = options.musicSheetIdleTimeout, model.fix?.isMoving ?? true, idle >= timeout { return true }
+        if let turn = nearMusicTurn(), turn != musicTurnHandled, idle >= options.musicSheetInputGrace {
+            musicTurnHandled = turn
+            return true
+        }
+        return false
+    }
+
+    /// Index of the upcoming turn while navigating when it is within `musicSheetTurnDistanceM`.
+    private func nearMusicTurn() -> Int? {
+        guard let limit = options.musicSheetTurnDistanceM, model.navigating, let turn = model.nav.progress?.upcomingTurn,
+              turn.distanceFromRiderM <= limit else { return nil }
+        return turn.index
+    }
+
+    /// Performs an intent as if its control had been activated (e.g. from the phone UI): applies
+    /// the UI-side effects and returns `[intent]`.
+    public func perform(_ intent: DashIntent, now: TimeInterval) -> [DashIntent] {
+        lock.lock(); defer { lock.unlock() }
+        advance(now)
+        return activate(intent, now: now)
+    }
+
+    /// Shows a transient toast (e.g. `NavEffect.toast`) for `duration` (default options.toastDuration).
+    public func showToast(_ text: String, now: TimeInterval, duration: TimeInterval? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        toast = (text, now + (duration ?? options.toastDuration))
+        scene = nil
+    }
+
+    /// The frame to render now. When the model has a `holdMessage`, the hold picture.
+    public func displayList(now: TimeInterval) -> DashDisplayList {
+        lock.lock(); defer { lock.unlock() }
+        advance(now)
+        if let msg = model.holdMessage { return holdList(title: msg) }
+        let sc = ensureScene()
+        var cmds = sc.commands
+        cmds += overlays(sc, now: now)
+        let regions = sc.widgets.filter { !$0.rect.isEmpty }.map {
+            DashHitRegion(id: $0.id, rect: $0.rect, focusable: sc.focusOrder.contains($0.id))
+        }
+        return DashDisplayList(size: model.canvas, background: model.chromeColor, commands: cmds, hitRegions: regions)
+    }
+
+    /// The "hold" picture (no hit regions): a clean card on the plain chrome colour — no map, no numbers that
+    /// would go stale (P0, D17) — "Map paused", "Voice keeps guiding" while a route runs with the voice on, and
+    /// "Resumes when you open the app, stopped". Encode it as an IDR before the app is backgrounded so the
+    /// media plane can keep answering pulls with it. `message` replaces the title; nil → the model's
+    /// `holdMessage` or "Map paused".
+    public func displayList(forHoldScreen message: String?, now: TimeInterval) -> DashDisplayList {
+        lock.lock(); defer { lock.unlock() }
+        advance(now)
+        return holdList(title: message ?? model.holdMessage ?? DashText.holdTitle.localized(model.language))
+    }
+
+    /// Current UI state snapshot.
+    public var state: DashUIState {
+        lock.lock(); defer { lock.unlock() }
+        let sc = ensureScene()
+        return DashUIState(sheet: sheet, camera: camera, focusedId: focus.focusedId, focusOrder: sc.focusOrder,
+                           toast: toast?.text ?? model.toastText, puckBearingDeg: puckBearing, menuScroll: menuScroll,
+                           searchListScroll: searchListScroll)
+    }
+
+    /// The map projection of the target camera (nil until positioned): where a running follow
+    /// ease ends. What is drawn at a given time: `mapProjection(now:)`.
+    public func mapProjection() -> MapProjection? {
+        lock.lock(); defer { lock.unlock() }
+        return projection()
+    }
+
+    /// Raster tiles of the target camera (tile prefetch / cache warm-up: the picture a running
+    /// follow ease ends on; tiles drawn on the way are requested by the renderer).
+    public func visibleTiles() -> [DashMapTile] {
+        lock.lock(); defer { lock.unlock() }
+        return projection()?.visibleTiles(maxTileZoom: model.maxTileZoom) ?? []
+    }
+
+    /// The projection `displayList(now:)` draws the map with at `now` (follow ease included).
+    public func mapProjection(now: TimeInterval) -> MapProjection? {
+        lock.lock(); defer { lock.unlock() }
+        advance(now)
+        return shownProjection()
+    }
+
+    /// The raster tiles `displayList(now:)` draws at `now`.
+    public func visibleTiles(now: TimeInterval) -> [DashMapTile] {
+        lock.lock(); defer { lock.unlock() }
+        advance(now)
+        return shownProjection()?.visibleTiles(maxTileZoom: model.maxTileZoom) ?? []
+    }
+
+    /// True while the follow ease runs at `now`: the drawn map keeps changing without new input.
+    public func isAnimating(now: TimeInterval) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        advance(now)
+        return ease != nil
+    }
+
+    // MARK: - Geometry helpers
+
+    private var layoutContext: DashLayoutContext { DashLayoutContext(model: model, measurer: measurer) }
+
+    /// Map anchor: the centre of the safe area.
+    private var anchor: DashPoint { let s = model.safeRect; return DashPoint(s.midX, s.midY) }
+
+    private func projection() -> MapProjection? {
+        camera.projection(viewport: model.canvas, anchor: anchor, tileSize: model.tileSize)
+    }
+
+    // MARK: - Follow ease (iOS addition, DashFollowEase.swift)
+
+    /// The targets: the camera and the model's rider (nil until positioned).
+    private func targetView() -> DashMapView? {
+        guard let c = camera.center else { return nil }
+        return DashMapView(center: c, zoom: camera.zoom, bearingDeg: camera.bearingDeg, puck: model.riderPosition,
+                           puckBearingDeg: puckBearing)
+    }
+
+    /// What is drawn (as of the last `now` seen): the running ease, else the targets.
+    private func shownView() -> DashMapView? {
+        guard let t = targetView() else { return nil }
+        return ease?.view(base: t) ?? t
+    }
+
+    private func shownProjection() -> MapProjection? {
+        guard let v = shownView() else { return nil }
+        return MapProjection(center: v.center, zoom: v.zoom, bearingDeg: v.bearingDeg, viewport: model.canvas, anchor: anchor,
+                             tileSize: model.tileSize)
+    }
+
+    /// After `update` moved the targets: keep, start or drop the ease from what was on screen.
+    private func retarget(from before: DashMapView?, cameraMoved: Bool, jump: Bool) {
+        guard options.followEaseDuration > 0, !jump, let before, let after = targetView(),
+              before.puck != nil, after.puck != nil else {
+            ease = nil
+            return
+        }
+        // A model change that does not move the targets (metrics, toasts, a repeated fix…) must not
+        // restart or slow down the running ease.
+        if let e = ease {
+            let same = e.movesCamera ? e.to == after
+                : !cameraMoved && e.to.puck == after.puck && e.to.puckBearingDeg == after.puckBearingDeg
+            if same { return }
+        }
+        if before == after {
+            ease = nil
+            return
+        }
+        let movesCamera = !before.hasSameCamera(as: after)
+        // Only the follow camera eases; a camera moved for any other reason jumps. Sub-2 dp changes
+        // (compass / GPS noise while stopped) jump too: invisible, and no 0.35 s of frames at the
+        // frame cap for every 125 ms compass tick.
+        guard !movesCamera || (camera.follow && !model.inPreview), easeTravelIsSmall(before, after),
+              easeMovementPx(before, after) >= layoutContext.dp(Self.followEaseMinimumMovementDp) else {
+            ease = nil
+            return
+        }
+        ease = DashFollowEase(from: before, to: after, duration: options.followEaseDuration, tileSize: model.tileSize,
+                              movesCamera: movesCamera)
+    }
+
+    /// Smaller visible changes are applied without an ease (dp).
+    static let followEaseMinimumMovementDp = 2.0
+
+    /// Largest on-screen movement (px) from view `a` to view `b`: the map under the safe-area
+    /// corners (pan, zoom and rotation), the puck, and the tip of the puck icon (its own rotation).
+    private func easeMovementPx(_ a: DashMapView, _ b: DashMapView) -> Double {
+        let pa = MapProjection(center: a.center, zoom: a.zoom, bearingDeg: a.bearingDeg, viewport: model.canvas, anchor: anchor,
+                               tileSize: model.tileSize)
+        let pb = MapProjection(center: b.center, zoom: b.zoom, bearingDeg: b.bearingDeg, viewport: model.canvas, anchor: anchor,
+                               tileSize: model.tileSize)
+        func dist(_ p: DashPoint, _ q: DashPoint) -> Double { hypot(p.x - q.x, p.y - q.y) }
+        let safe = model.safeRect
+        var m = 0.0
+        for s in [DashPoint(safe.minX, safe.minY), DashPoint(safe.maxX, safe.minY), DashPoint(safe.maxX, safe.maxY),
+                  DashPoint(safe.minX, safe.maxY)] {
+            m = max(m, dist(pb.screenPoint(pa.geoPoint(atScreen: s)), s))
+        }
+        if let ra = a.puck, let rb = b.puck { m = max(m, dist(pb.screenPoint(rb), pa.screenPoint(ra))) }
+        let turn = DashEasing.shortestTurnDeg(from: a.puckBearingDeg - a.bearingDeg, to: b.puckBearingDeg - b.bearingDeg)
+        return max(m, abs(turn) * .pi / 180 * layoutContext.dp(24))
+    }
+
+    /// Far jumps (first fix after a tunnel, a GPS glitch) are not animated: the tiles on the way
+    /// are not loaded and a long slide is disorienting.
+    private func easeTravelIsSmall(_ a: DashMapView, _ b: DashMapView) -> Bool {
+        let limit = max(model.canvas.width, model.canvas.height)
+        let proj = MapProjection(center: b.center, zoom: b.zoom, bearingDeg: b.bearingDeg, viewport: model.canvas, anchor: anchor,
+                                 tileSize: model.tileSize)
+        func far(_ p: DashPoint, _ q: DashPoint) -> Bool { hypot(p.x - q.x, p.y - q.y) > limit }
+        if let pa = a.puck, let pb = b.puck, far(proj.screenPoint(pa), proj.screenPoint(pb)) { return false }
+        return !far(proj.screenPoint(a.center), proj.anchor)
+    }
+
+    /// An explicit RELATIVE camera change (gesture, zoom button, follow off) continues from what is
+    /// drawn: the running ease's camera becomes the camera; a gliding puck keeps gliding.
+    private func freezeShownCamera() {
+        guard var e = ease, e.movesCamera, let v = shownView() else { return }
+        camera.center = v.center
+        camera.zoom = v.zoom
+        camera.bearingDeg = v.bearingDeg
+        e.movesCamera = false
+        ease = e
+        scene = nil
+    }
+
+    /// An explicit ABSOLUTE camera change (recenter, overview, fits, compass, follow on) jumps.
+    private func cancelEase() {
+        guard ease != nil else { return }
+        ease = nil
+        scene = nil
+    }
+
+    // MARK: - Camera policy (navigation-dash.md §4.9)
+
+    /// Bearing for the map / puck: GPS course while moving → compass in heading-up → track
+    /// bearing → bearing to the destination → the nav engine's puck bearing.
+    private func currentBearing() -> Double {
+        if let f = model.fix, f.isMoving, let c = f.courseDeg { return c }
+        if camera.headingUp, let h = model.compassHeadingDeg { return h }
+        if let p = model.nav.progress { return p.trackBearingDeg }
+        if let d = model.nav.destination, let me = model.riderPosition { return DashGeo.bearingDeg(from: me, to: d.point) }
+        return model.nav.puckBearingDeg
+    }
+
+    /// `bestBearing()`: GPS course while moving, else compass, else the last map bearing.
+    private func bestBearing() -> Double {
+        if let f = model.fix, f.isMoving, let c = f.courseDeg { return c }
+        if let h = model.compassHeadingDeg { return h }
+        return camera.lastMapBearing
+    }
+
+    private func lookAheadCap() -> Double? {
+        guard options.clampLookAheadToVisibleMap else { return nil }
+        let c = layoutContext
+        var bottom = c.safe.maxY
+        if model.navigating {
+            bottom = DashSceneBuilder.metricsLayout(model, c).frame.minY
+        }
+        return max(0, bottom - c.dp(24 + 8) - anchor.y)
+    }
+
+    private func applyFollowCamera() {
+        guard let me = model.riderPosition else { return }
+        let fix = model.fix
+        let moving = fix?.isMoving ?? false
+        let brng = currentBearing()
+        puckBearing = brng
+        let speedKmh = (fix?.speedMps ?? 0) * 3.6
+        let z = camera.targetFollowZoom(speedKmh: speedKmh)
+        camera.applyFollow(me: me, bearingDeg: brng, targetZoom: z, moving: moving, maxLookAheadPx: lookAheadCap(),
+                           tileSize: model.tileSize)
+        camera.lastMapBearing = camera.headingUp ? brng : 0
+    }
+
+    /// First positioning when the follow camera did not run: on the rider (e.g. zoomed before
+    /// the first fix), else the route / destination (GpxDashUi bind).
+    private func positionIfNeeded() {
+        cameraJumped = true
+        if let me = model.riderPosition {
+            camera.center = me
+            return
+        }
+        if let route = model.nav.route, route.points.count >= 2 {
+            fit(Self.sample(route.points), rect: mapFreeRect(previewTop: nil))
+        } else if let d = model.nav.destination {
+            camera.setCenter(d.point, zoom: 15.5)
+        }
+    }
+
+    private static func sample(_ pts: [TrackPoint], max: Int = 500) -> [GeoPoint] {
+        guard !pts.isEmpty else { return [] }
+        let step = Swift.max(1, pts.count / max)
+        var out: [GeoPoint] = []
+        for (i, p) in pts.enumerated() where i % step == 0 || i == pts.count - 1 { out.append(p.point) }
+        return out
+    }
+
+    /// Free map area for overviews: below the top chrome (`topY`, default: under the search
+    /// pill), above `previewTop` (a bottom card), left of the FABs.
+    private func mapFreeRect(previewTop: Double?, topY: Double? = nil) -> DashRect {
+        let c = layoutContext
+        let fabs = DashLayout.fabColumn(c)
+        let top = topY ?? c.safe.minY + c.dp(DashDimens.pillMarginTop + DashDimens.pillHeight + 8)
+        var bottom = (previewTop ?? c.safe.maxY) - c.dp(8)
+        if bottom - top < c.dp(64) { bottom = min(c.safe.maxY - c.dp(8), top + c.dp(64)) }
+        let left = c.safe.minX + c.dp(8)
+        let right = (fabs.first?.minX ?? c.safe.maxX) - c.dp(8)
+        return DashRect(x: left, y: top, width: max(c.dp(64), right - left), height: max(c.dp(48), bottom - top))
+    }
+
+    /// Room for the markers drawn around fitted points: the destination pin rises 44 dp above
+    /// its point, the puck is 48 dp wide.
+    private func markerInset(_ r: DashRect) -> DashRect {
+        let c = layoutContext
+        let side = c.dp(24), top = c.dp(44), bottom = c.dp(24), minSide = c.dp(32)
+        let w = max(minSide, r.width - 2 * side)
+        let x = r.midX - w / 2
+        if r.height - top - bottom >= minSide {
+            return DashRect(x: x, y: r.minY + top, width: w, height: r.height - top - bottom)
+        }
+        return DashRect(x: x, y: r.midY - minSide / 2, width: w, height: minSide)
+    }
+
+    private func fit(_ points: [GeoPoint], rect: DashRect) {
+        camera.fit(points, in: markerInset(rect), viewport: model.canvas, anchor: anchor, tileSize: model.tileSize)
+    }
+
+    private func fitPreview(_ p: RoutePreview) {
+        if p.pinMode {
+            camera.setCenter(p.place.point, zoom: 16)
+            return
+        }
+        let me = model.riderPosition
+        if p.routes.isEmpty && me == nil {
+            camera.setCenter(p.place.point, zoom: 16)
+            return
+        }
+        var pts: [GeoPoint] = []
+        for r in p.routes { pts += Self.sample(r.points) }
+        if let me { pts.append(me) }
+        pts.append(p.place.point)
+        let c = layoutContext
+        let card = DashLayout.previewCard(c, preview: p, language: model.language)
+        // Candidate free areas: above the card (full width) and, in landscape, right of the card
+        // (down to the speed chip). Keep the one giving the closest overview.
+        var candidates = [mapFreeRect(previewTop: card.frame.minY)]
+        if c.isLandscape {
+            let top = candidates[0].minY
+            let fabX = DashLayout.fabColumn(c).first?.minX ?? c.safe.maxX
+            let chip = DashLayout.speedChip(c, hasLimit: DashSceneBuilder.speedLimitLabel(model) != nil, navigating: false)
+            let right = DashRect(x: card.frame.maxX + c.dp(8), y: top, width: fabX - c.dp(8) - card.frame.maxX - c.dp(8),
+                                 height: chip.frame.minY - c.dp(8) - top)
+            if right.width > c.dp(120), right.height > c.dp(120) { candidates.append(right) }
+        }
+        var best = candidates[0]
+        var bestZoom = -Double.infinity
+        for r in candidates {
+            if let proj = MapProjection.fitting(pts, in: markerInset(r), viewport: model.canvas, anchor: anchor,
+                                                tileSize: model.tileSize, minZoom: DashCamera.minZoom, maxZoom: DashCamera.maxZoom),
+               proj.zoom > bestZoom + 1e-9 {
+                bestZoom = proj.zoom
+                best = r
+            }
+        }
+        fit(pts, rect: best)
+    }
+
+    // MARK: - Transitions (navigation-dash.md §11.6, §11.8)
+
+    /// Identity of the running navigation: GPX track name or NAV_TO destination location
+    /// (names / subtitles may be refreshed by the nav engine without a new navigation).
+    static func navIdentity(_ m: DashModel) -> String? {
+        switch m.nav.mode {
+        case .freeRide: return nil
+        case let .gpx(name): return "gpx:\(name)"
+        case let .navTo(p): return "nav:" + String(format: "%.5f,%.5f", p.lat, p.lon)
+        }
+    }
+
+    private func transitions(from prev: DashModel, to new: DashModel) {
+        let navStarted = new.navigating && Self.navIdentity(prev) != Self.navIdentity(new)
+        if let p = new.nav.preview {
+            if let old = prev.nav.preview, old.place == p.place, old.pinMode == p.pinMode {
+                if Self.routesChanged(old, p) {
+                    cameraJumped = true
+                    fitPreview(p)
+                    pendingPreference = .go
+                }
+            } else {
+                previewStarted(p, fresh: prev.nav.preview == nil)
+            }
+        } else if prev.nav.preview != nil && !navStarted {
+            if options.restoreCameraAfterPreview, let s = savedCamera {
+                cameraJumped = true // back to the follow camera from the overview: a jump, like Recenter
+                camera.follow = s.follow
+                camera.headingUp = s.headingUp
+                camera.speedZoom = s.speedZoom
+            }
+            savedCamera = nil
+            pendingPreference = DashFocusEngine.defaultPreference(inPreview: false, navigating: new.navigating)
+        }
+        if navStarted {
+            cameraJumped = true
+            savedCamera = nil
+            camera.follow = true
+            camera.speedZoom = true
+            camera.headingUp = true
+            camera.cancelAutoRecenter()
+            sheet = .none
+            if new.riderPosition == nil {
+                if let route = new.nav.route, route.points.count >= 2 {
+                    fit(Self.sample(route.points), rect: mapFreeRect(previewTop: nil))
+                } else if let d = new.nav.destination {
+                    camera.setCenter(d.point, zoom: 16)
+                }
+            }
+            pendingPreference = .recenter // P0 (D01): never End
+            // The start owns the focus: Recenter is where it puts the knob, not a stand-in parked for a vanished
+            // Music control, so the song coming back does not move it to the tile.
+            musicFocusReturn = nil
+            musicFocusParkedOn = nil
+        } else if prev.navigating && !new.nav.mode.isNavigating && new.nav.preview == nil {
+            pendingPreference = .default
+        }
+        // P0 (D01): a confirm card whose question no longer applies closes, committing nothing (the route ended
+        // or arrived by itself, the preview went away).
+        if sheet == .confirm {
+            let stillAsks: Bool
+            switch confirmKind {
+            case .endRoute: stillAsks = new.navigating
+            case .changeRoute: stillAsks = new.inPreview && new.routeRunning && prev.nav.preview?.place == new.nav.preview?.place
+            case nil: stillAsks = false
+            }
+            if !stillAsks {
+                sheet = .none
+                confirmKind = nil
+                pendingPreference = DashFocusEngine.defaultPreference(inPreview: new.inPreview, navigating: new.navigating)
+            }
+        }
+        // Apple Music: the sheet closes when the song is gone (feature off, another app plays…) and
+        // when arrival starts (a preview / navigation start already closed every sheet above). A song
+        // that went away may be back in a moment, and the rider's next ★ was meant for ⏯: never the
+        // default item, End while navigating (F2). Arrival keeps its own rule below.
+        // R3-FOCUS-1: a song gone for a moment (no item between two songs, past the app's own hold) does not
+        // close the sheet: it stays open on the song it showed for `musicSheetVanishGrace` (`tick` closes it when
+        // the song stays gone), so the rider's next ★, ▶ ★ or ◀ ★ still means ⏯, ⏭ or ⏮. Closed, the knob
+        // would come back to the tile, from where ▶ wraps to End. R4-FOCUS-2: the hold outlives the sheet (HOME's
+        // menu, the tile after BACK / ✕) until `tick` ends it; a preview, the arrival card or a navigation start
+        // drop it.
+        let arrivalStarts = new.showsArrival && !prev.showsArrival
+        if sheet == .music, new.music == nil, !arrivalStarts, options.musicSheetVanishGrace != nil,
+           let shown = musicHeld?.music ?? prev.music {
+            if musicHeld == nil { musicHeld = (shown, lastNow ?? 0) }
+        } else if sheet == .music && (new.music == nil || arrivalStarts) {
+            sheet = .none
+            pendingPreference = new.music == nil ? .musicGone
+                : DashFocusEngine.defaultPreference(inPreview: new.inPreview, navigating: new.navigating)
+        }
+        if new.music != nil || navStarted || new.inPreview || new.showsArrival { musicHeld = nil }
+        if new.showsArrival && !prev.showsArrival {
+            focus.clear()
+            pendingPreference = .default
+        }
+        if prev.search.results != new.search.results { searchListScroll = 0 }
+    }
+
+    private static func routesChanged(_ a: RoutePreview, _ b: RoutePreview) -> Bool {
+        if a.routes.count != b.routes.count || a.selectedIndex != b.selectedIndex { return true }
+        for (x, y) in zip(a.routes, b.routes) where x.points.count != y.points.count || x.distanceM != y.distanceM {
+            return true
+        }
+        return false
+    }
+
+    private func previewStarted(_ p: RoutePreview, fresh: Bool) {
+        cameraJumped = true
+        if fresh { savedCamera = (camera.follow, camera.headingUp, camera.speedZoom) }
+        sheet = .none
+        camera.follow = false
+        camera.speedZoom = false
+        camera.cancelAutoRecenter()
+        if !p.pinMode {
+            camera.headingUp = false // overview is always north-up
+            camera.resetNorth()
+        }
+        previewChipScroll = 0
+        fitPreview(p)
+        pendingPreference = .go
+    }
+
+    // MARK: - Timers
+
+    private func advance(_ now: TimeInterval) {
+        if var e = ease {
+            let progress = e.progress
+            if e.advance(to: now) {
+                ease = e
+                if e.progress != progress { scene = nil }
+            } else {
+                ease = nil // over: the targets themselves are drawn from now on
+                scene = nil
+            }
+        }
+        if camera.advance(now: now) {
+            if !model.inPreview {
+                cancelEase() // the free-pan auto-recenter jumps back, like Recenter
+                applyFollowCamera()
+            }
+            scene = nil
+        }
+        if let t = toast, now >= t.until {
+            toast = nil
+            scene = nil
+        }
+        // Apple Music: rebuild only when the time-dependent drawing changes (a whole second on the
+        // sheet, a whole px of the tile's bar), never for the steady advance in between.
+        let musicNow = max(lastNow ?? now, now)
+        lastNow = musicNow
+        if let sc = scene, let key = sc.musicTimeKey,
+           DashSceneBuilder.musicTimeKey(shownMusic, sheetOpen: sheet == .music, tileBarWidth: sc.musicTileBarWidth,
+                                         now: musicNow) != key {
+            scene = nil
+        }
+    }
+
+    // MARK: - Scene
+
+    /// The song drawn: the model's, or the one held since the open Music sheet lost it (R3-FOCUS-1) — on the sheet
+    /// and on whatever the rider reached from it during the hold (R4-FOCUS-2).
+    private var shownMusic: DashNowPlaying? { model.music ?? musicHeld?.music }
+
+    private func buildScene() -> DashScene {
+        // The map is drawn as shown (follow ease); the chrome reads the camera flags.
+        var drawn = camera
+        var puck = model.riderPosition
+        var puckBrg = puckBearing
+        if let v = shownView() {
+            drawn.center = v.center
+            drawn.zoom = v.zoom
+            drawn.bearingDeg = v.bearingDeg
+            puck = v.puck
+            puckBrg = v.puckBearingDeg
+        }
+        var shown = model
+        shown.music = shownMusic // R3-FOCUS-1: the open sheet keeps its song through a short vanish
+        let input = DashSceneInput(model: shown, sheet: sheet, camera: drawn, puckBearingDeg: puckBrg, puck: puck, anchor: anchor,
+                                   menuScroll: menuScroll, searchListScroll: searchListScroll,
+                                   searchChipScroll: searchChipScroll, previewChipScroll: previewChipScroll,
+                                   lapReachableByHandlebar: options.lapReachableByHandlebar,
+                                   handlebarReachesSettings: options.handlebarReachesSettings,
+                                   musicNow: lastNow ?? shown.music?.positionAt ?? 0,
+                                   confirm: sheet == .confirm ? confirmKind : nil)
+        var b = DashSceneBuilder(input: input, measurer: measurer)
+        return b.build()
+    }
+
+    private func ensureScene() -> DashScene {
+        if let s = scene { return s }
+        var s = buildScene()
+        let defaultPref = DashFocusEngine.defaultPreference(inPreview: model.inPreview, navigating: model.navigating)
+        let before = focus.focusedId
+        if let pref = pendingPreference {
+            focus.ensure(s.focusOrder, prefer: pref)
+            pendingPreference = nil
+            if pref == .musicGone || (pref == .musicTile && !s.focusOrder.contains(DashFocusEngine.musicTileId)),
+               let parked = focus.focusedId {
+                parkMusicFocus(returnTo: DashFocusEngine.musicTileId, parkedOn: parked)
+            } else if pref == .menuMusic, !s.focusOrder.contains(DashFocusEngine.menuMusicId), let parked = focus.focusedId {
+                parkMusicFocus(returnTo: DashFocusEngine.menuMusicId, parkedOn: parked) // gone in the same frame
+            }
+        } else if focus.focusedId.map({ !s.focusOrder.contains($0) }) ?? true {
+            // F2: a Music control that vanished under the focus (the tile or the menu's "Music" while
+            // the song is gone for a moment) parks it on a harmless stand-in, not the default item (End
+            // while navigating before P0, where the rider's next ★ ended navigation without confirmation).
+            let gone = focus.focusedId
+            let musicGone = gone.map(DashFocusEngine.isMusicControl) ?? false
+            focus.ensure(s.focusOrder, prefer: musicGone ? .musicGone : defaultPref)
+            if musicGone, let gone, let parked = focus.focusedId {
+                parkMusicFocus(returnTo: gone == DashFocusEngine.menuMusicId ? gone : DashFocusEngine.musicTileId,
+                               parkedOn: parked)
+            }
+        } else if let r = musicFocusReturn {
+            if focus.focusedId != r.parkedOn {
+                musicFocusReturn = nil // something else moved it (navigation start, a sheet…)
+            } else if s.focusOrder.contains(r.id) {
+                focus.focus(r.id, in: s.focusOrder) // the song is back: so is the rider's focus
+                musicFocusReturn = nil
+            }
+        }
+        if musicFocusParkedOn != focus.focusedId { musicFocusParkedOn = nil } // the focus left the stand-in
+        // Scroll the focused control into view only when the focus moved (never fight a drag).
+        if focus.focusedId != before || revealFocus {
+            revealFocus = false
+            if scrollFocusedIntoView(s) { s = buildScene() }
+        }
+        clampScrolls(s)
+        scene = s
+        return s
+    }
+
+    /// A vanished Music control parked the focus on `parked`: back to `id` when it is listed again with no
+    /// dash input in between (R2-DASH-1); a `musicGoneIds` stand-in also takes BACK and sheet closes the
+    /// way the Music control it stands for would (`focusStandsForMusic`).
+    private func parkMusicFocus(returnTo id: String, parkedOn parked: String) {
+        musicFocusReturn = (id, parked)
+        musicFocusParkedOn = DashFocusEngine.musicGoneIds.contains(parked) ? parked : nil
+    }
+
+    /// Blind-input safety (iOS addition): the focus is on the menu's "Music", or rests where a vanished
+    /// Music control parked it. BACK there, or a sheet closing under it (HOME, ★ on the parked "Circuit"),
+    /// sends the focus to the tile (`.musicTile`: the tile, else parked again until it is back), never to
+    /// the default item — End while navigating, where the rider's next ★, meant for the Music controls,
+    /// would end navigation without a confirmation. No Android flow lands here: "Music" is an iOS addition,
+    /// and a stand-in only exists after a Music control vanished (a Recenter or Circuit the rider moved to
+    /// keeps Android's rule).
+    private var focusStandsForMusic: Bool {
+        guard let id = focus.focusedId else { return false }
+        return id == DashFocusEngine.menuMusicId || id == musicFocusParkedOn
+    }
+
+    private func clampScrolls(_ s: DashScene) {
+        func clamp(_ v: inout Double, _ id: String) {
+            if let c = s.containers[id] { v = min(max(0, v), c.maxOffset) }
+        }
+        clamp(&menuScroll, "menu")
+        clamp(&searchListScroll, "search.list")
+        clamp(&searchChipScroll, "search.chips")
+        clamp(&previewChipScroll, "preview.chips")
+    }
+
+    private func scrollOffset(_ id: String) -> Double {
+        switch id {
+        case "menu": return menuScroll
+        case "search.list": return searchListScroll
+        case "search.chips": return searchChipScroll
+        case "preview.chips": return previewChipScroll
+        default: return 0
+        }
+    }
+
+    private func setScrollOffset(_ id: String, _ v: Double) {
+        switch id {
+        case "menu": menuScroll = v
+        case "search.list": searchListScroll = v
+        case "search.chips": searchChipScroll = v
+        case "preview.chips": previewChipScroll = v
+        default: break
+        }
+    }
+
+    /// Keeps the focused control inside its scroll container (`requestRectangleOnScreen`).
+    private func scrollFocusedIntoView(_ s: DashScene) -> Bool {
+        guard let id = focus.focusedId, let w = s.widget(id), let cid = w.container, let cont = s.containers[cid] else { return false }
+        let margin = layoutContext.dp(8)
+        let old = scrollOffset(cid)
+        var off = old
+        switch cont.axis {
+        case .vertical:
+            if w.fullRect.minY < cont.viewport.minY {
+                off -= cont.viewport.minY - w.fullRect.minY + margin
+            } else if w.fullRect.maxY > cont.viewport.maxY {
+                off += w.fullRect.maxY - cont.viewport.maxY + margin
+            }
+            // P0 (D03): the speed chip is drawn over the container — scroll the focused control clear of it,
+            // above or below, whichever moves less and keeps it inside the viewport.
+            if let ob = cont.obstacle {
+                let shifted = w.fullRect.offsetBy(dx: 0, dy: old - off)
+                if shifted.intersects(ob) {
+                    let up = off + (shifted.maxY - (ob.minY - margin))
+                    let down = off - ((ob.maxY + margin) - shifted.minY)
+                    let fits = [up, down].filter { cand in
+                        guard cand >= 0, cand <= cont.maxOffset else { return false }
+                        let r = w.fullRect.offsetBy(dx: 0, dy: old - cand)
+                        return r.minY >= cont.viewport.minY - 0.5 && r.maxY <= cont.viewport.maxY + 0.5
+                    }
+                    if let best = fits.min(by: { abs($0 - off) < abs($1 - off) }) { off = best }
+                }
+            }
+        case .horizontal:
+            if w.fullRect.minX < cont.viewport.minX {
+                off -= cont.viewport.minX - w.fullRect.minX + margin
+            } else if w.fullRect.maxX > cont.viewport.maxX {
+                off += w.fullRect.maxX - cont.viewport.maxX + margin
+            }
+        }
+        off = min(max(0, off), cont.maxOffset)
+        guard abs(off - old) > 0.01 else { return false }
+        setScrollOffset(cid, off)
+        return true
+    }
+
+    // MARK: - Input
+
+    private func hitTarget(_ p: DashPoint, _ s: DashScene) -> DashTouchTarget {
+        guard model.safeRect.contains(p) else { return .ignored }
+        guard let w = s.widgets.last(where: { !$0.rect.isEmpty && $0.rect.contains(p) }) else { return .map }
+        switch w.kind {
+        case .control:
+            if let cid = w.container { return .controlInScroll(id: w.id, rect: w.rect, container: cid) }
+            return .control(id: w.id, rect: w.rect)
+        case .scrollArea:
+            return .scrollArea(container: w.container ?? w.id)
+        case .blocker:
+            return .blocker
+        }
+    }
+
+    private func apply(_ events: [DashGestureEvent], now: TimeInterval) -> [DashIntent] {
+        var out: [DashIntent] = []
+        for e in events {
+            switch e {
+            case let .tap(id):
+                guard let w = (scene ?? ensureScene()).widget(id), case let .control(intent) = w.kind, let intent else { continue }
+                if let order = scene?.focusOrder { focus.focus(id, in: order) }
+                out += activate(intent, now: now)
+            case .mapTap:
+                break
+            case let .longPress(p):
+                // the point under the finger in the picture on screen
+                if let proj = shownProjection() { out += activate(.dropPin(proj.geoPoint(atScreen: p)), now: now) }
+            case let .doubleTap(p):
+                guard camera.isPositioned else { continue }
+                freezeShownCamera()
+                if options.panStopsFollow { camera.bumpFreePan(now: now) }
+                camera.speedZoom = false
+                camera.setZoom(camera.zoom + 1, keeping: p, viewport: model.canvas, anchor: anchor, tileSize: model.tileSize)
+                scene = nil
+            case .panBegan:
+                freezeShownCamera()
+                if options.panStopsFollow, camera.isPositioned { camera.bumpFreePan(now: now) }
+            case let .pan(d):
+                guard camera.isPositioned else { continue }
+                freezeShownCamera()
+                if options.panStopsFollow { camera.bumpFreePan(now: now) }
+                camera.pan(byScreenDelta: d, viewport: model.canvas, anchor: anchor, tileSize: model.tileSize)
+                scene = nil
+            case .panEnded:
+                break
+            case let .pinch(scale, focal, translation):
+                guard camera.isPositioned, scale > 0 else { continue }
+                freezeShownCamera()
+                if options.panStopsFollow { camera.bumpFreePan(now: now) }
+                camera.speedZoom = false
+                camera.setZoom(camera.zoom + log2(scale), keeping: focal, viewport: model.canvas, anchor: anchor, tileSize: model.tileSize)
+                camera.pan(byScreenDelta: translation, viewport: model.canvas, anchor: anchor, tileSize: model.tileSize)
+                scene = nil
+            case let .scroll(container, delta):
+                guard let cont = (scene ?? ensureScene()).containers[container] else { continue }
+                let d = cont.axis == .vertical ? delta.y : delta.x
+                setScrollOffset(container, min(max(0, scrollOffset(container) - d), cont.maxOffset))
+                scene = nil
+            }
+        }
+        return out
+    }
+
+    private func handleKey(_ k: HandlebarKey, now: TimeInterval) -> [DashIntent] {
+        switch k {
+        case .enter:
+            let sc = ensureScene()
+            focus.ensure(sc.focusOrder, prefer: .default)
+            guard let id = focus.focusedId, let w = sc.widget(id), case let .control(intent) = w.kind, let intent else {
+                Log.d("GPX", "[GPX] Select — nothing focused")
+                return []
+            }
+            return activate(intent, now: now)
+        case .back:
+            var out: [DashIntent] = []
+            let closesMusic = sheet == .music
+            // R2-DASH-2: BACK on the now-playing tile keeps it. A Music sheet that closed by itself (idle,
+            // near a turn, R2) parked the focus there and the rider's BACK was meant for that sheet:
+            // Android's idle BACK → End would turn the next ★, meant for the tile, into an unconfirmed end
+            // of navigation. The tile is an iOS addition, so no Android flow lands here. The scene first:
+            // a timed close's pending `.musicTile` is applied only at the next build.
+            _ = ensureScene()
+            let onTile = focus.focusedId == DashFocusEngine.musicTileId
+            let forMusic = focusStandsForMusic // the menu's "Music", or a vanished Music control's stand-in
+            if sheet != .none {
+                out = activate(.closeSheets, now: now)
+            } else if model.showsArrival {
+                out = [.dismissArrival]
+            } else if model.inPreview {
+                out = [.cancelPreview]
+            } else {
+                Log.d("GPX", "[GPX] Back — idle")
+            }
+            // Leaving the Music sheet returns the focus to the now-playing tile.
+            pendingPreference = closesMusic || onTile || forMusic ? .musicTile
+                : DashFocusEngine.defaultPreference(inPreview: model.inPreview, navigating: model.navigating)
+            scene = nil
+            return out
+        case .home:
+            // R3-FOCUS-3: HOME from the Music sheet opens the menu on its "Music", not on End (the first item
+            // while navigating). On the iOS default map HOME is ▶▶, and two quick ▶ are also the rider's way
+            // from ⏯ to ✕: the ★ meant for ✕ would end navigation without confirmation. The mirror of the
+            // blind-input rule (closing the menu from "Music" lands on the tile); Android has no Music sheet.
+            // The scene first, as for BACK: a second HOME before any frame closes that menu from "Music".
+            // R4-FOCUS-1: so does HOME from where a closed sheet left the knob — the tile, or the stand-in a
+            // vanish parked it on — as BACK does (R2-DASH-2, focusStandsForMusic): a sheet that closed by itself
+            // (the song gone past musicSheetVanishGrace, which can end between the two ▶ of ▶▶; idle; near a
+            // turn) must not turn HOME ★ into an unconfirmed end of navigation. Map only: with the menu open HOME
+            // closes it, and a close from "Music" or the parked Circuit already lands on the tile.
+            _ = ensureScene()
+            let fromMusic = sheet == .music
+                || (sheet == .none && (focusStandsForMusic || focus.focusedId == DashFocusEngine.musicTileId))
+            let out = activate(sheet == .menu ? .closeSheets : .openMenu, now: now)
+            if fromMusic { pendingPreference = .menuMusic }
+            return out
+        case .assistant:
+            return activate(sheet == .search ? .closeSheets : .openSearch, now: now)
+        case .left, .up:
+            moveFocus(-1)
+            return []
+        case .right, .down:
+            moveFocus(1)
+            return []
+        }
+    }
+
+    private func moveFocus(_ delta: Int) {
+        let sc = ensureScene()
+        focus.move(sc.focusOrder, by: delta)
+        revealFocus = true
+        scene = nil
+    }
+
+    // MARK: - Intents
+
+    private func feedback(_ t: DashText, now: TimeInterval) {
+        guard options.feedbackToasts else { return }
+        toast = (t.localized(model.language), now + options.toastDuration)
+    }
+
+    /// Opens the confirm card (P0, D01): nothing reaches the app until its action is chosen.
+    private func openConfirm(_ kind: DashConfirmKind, now: TimeInterval) -> [DashIntent] {
+        sheet = .confirm
+        confirmKind = kind
+        confirmActivityAt = now
+        pendingPreference = .confirmKeep
+        scene = nil
+        return []
+    }
+
+    /// Applies the UI-side effect of an intent and returns it for the app.
+    private func activate(_ intent: DashIntent, now: TimeInterval) -> [DashIntent] {
+        // Where a sheet closing leaves the focus: a sheet closed from the menu's "Music" or from a vanished
+        // Music control's stand-in (★ on the parked "Circuit", HOME) hands it to the tile.
+        let navPref: DashFocusPreference = sheet != .none && focusStandsForMusic ? .musicTile
+            : DashFocusEngine.defaultPreference(inPreview: model.inPreview, navigating: model.navigating)
+        // P0 (D01): ending a running route, or replacing it with a previewed one, asks first. The confirm card's
+        // action carries the same intent and is the only way it reaches the app.
+        let confirming = sheet == .confirm
+        if intent == .endNavigation, model.navigating, !(confirming && confirmKind == .endRoute) {
+            return openConfirm(.endRoute, now: now)
+        }
+        if intent == .go, model.inPreview, model.routeRunning, !(confirming && confirmKind == .changeRoute) {
+            return openConfirm(.changeRoute, now: now)
+        }
+        if confirming, intent != .closeSheets { confirmKind = nil } // the action, or another sheet, replaces it
+        switch intent {
+        case .recenter:
+            if sheet == .menu { // the menu's «Recenter» (its default item): back to the map, like Reroute
+                sheet = .none
+                pendingPreference = navPref
+            }
+            camera.follow = true
+            camera.cancelAutoRecenter()
+            if let fix = model.fix, model.riderPosition != nil {
+                let brng = camera.headingUp ? bestBearing() : 0
+                camera.lastMapBearing = brng
+                if !model.inPreview {
+                    cancelEase()
+                    let me = model.riderPosition!
+                    puckBearing = currentBearing()
+                    camera.applyFollow(me: me, bearingDeg: brng, targetZoom: DashCamera.bikeFollowZoom(speedKmh: (fix.speedMps ?? 0) * 3.6),
+                                       moving: fix.isMoving, maxLookAheadPx: lookAheadCap(), tileSize: model.tileSize)
+                }
+                feedback(.centeredOnGps, now: now)
+            } else {
+                feedback(.noGpsYet, now: now)
+            }
+        case .zoomIn, .zoomOut:
+            freezeShownCamera() // ±1 from the zoom on screen
+            camera.bumpFreePan(now: now)
+            camera.speedZoom = false
+            camera.zoomBy(intent == .zoomIn ? 1 : -1)
+        case .toggleCompass, .toggleHeadingUp:
+            cancelEase()
+            camera.headingUp.toggle()
+            if !camera.headingUp {
+                camera.resetNorth()
+                camera.lastMapBearing = 0
+            } else {
+                let brng = bestBearing()
+                camera.lastMapBearing = brng
+                if camera.follow, !model.inPreview, let fix = model.fix, let me = model.riderPosition {
+                    camera.applyFollow(me: me, bearingDeg: brng, targetZoom: DashCamera.bikeFollowZoom(speedKmh: (fix.speedMps ?? 0) * 3.6),
+                                       moving: fix.isMoving, maxLookAheadPx: lookAheadCap(), tileSize: model.tileSize)
+                }
+            }
+            if intent == .toggleCompass { feedback(camera.headingUp ? .headingUp : .northUp, now: now) }
+        case .toggleFollow:
+            camera.follow.toggle()
+            camera.cancelAutoRecenter()
+            if camera.follow {
+                if !model.inPreview {
+                    cancelEase()
+                    applyFollowCamera()
+                }
+            } else {
+                freezeShownCamera() // Free pan: the map stays where it is drawn
+            }
+        case .overview:
+            cancelEase()
+            camera.bumpFreePan(now: now)
+            camera.headingUp = false
+            camera.resetNorth()
+            camera.lastMapBearing = 0
+            let route = model.nav.route?.points ?? []
+            let k = min(max(0, model.nav.progress?.nearestIndex ?? 0), max(0, route.count - 1))
+            if route.count - k >= 2 {
+                let c = layoutContext
+                var top: Double?
+                var bottom: Double?
+                if model.navigating {
+                    top = DashLayout.navCard(c, cue: model.nav.cue ?? HudCue(dir: .arrive, distanceText: "GPS", text: "")).frame.maxY + c.dp(8)
+                    bottom = DashSceneBuilder.metricsLayout(model, c).frame.minY
+                }
+                fit(Self.sample(Array(route[k...])), rect: mapFreeRect(previewTop: bottom, topY: top))
+                feedback(.routeOverview, now: now)
+            } else {
+                if let p = model.nav.destination?.point ?? model.riderPosition { camera.setCenter(p, zoom: 14) }
+                feedback(.overview, now: now)
+            }
+        case .openMenu:
+            sheet = .menu
+            menuScroll = 0
+            pendingPreference = .default
+        case .openSearch:
+            sheet = .search
+            searchListScroll = 0
+            searchChipScroll = 0
+            pendingPreference = .default
+        case .closeSheets:
+            pendingPreference = sheet == .music ? .musicTile : navPref
+            sheet = .none
+            confirmKind = nil
+        case .openMusic:
+            guard shownMusic != nil else { // a held song re-opens its sheet (R4-FOCUS-2)
+                feedback(.nothingPlaying, now: now)
+                break
+            }
+            guard !model.inPreview && !model.showsArrival else { break } // never over a preview or the arrival card (R3-FOCUS-2)
+            sheet = .music
+            musicActivityAt = now
+            // A turn already near when the rider opens the sheet does not close it again.
+            musicTurnHandled = nearMusicTurn()
+            pendingPreference = .musicPlayPause
+        case .musicPlayPause, .musicNext, .musicPrevious:
+            musicActivityAt = max(musicActivityAt, now) // the app performs it; it counts as dash activity
+        case .findParking:
+            sheet = .search
+            searchListScroll = 0
+            pendingPreference = .default
+        case .recalc:
+            sheet = .none
+            camera.follow = true
+            camera.cancelAutoRecenter()
+            if !model.inPreview {
+                cancelEase()
+                applyFollowCamera()
+            }
+            pendingPreference = navPref
+        case .go:
+            sheet = .none
+            camera.follow = true
+            camera.speedZoom = true
+            camera.headingUp = true
+            camera.cancelAutoRecenter()
+        case .dropPin, .previewPlace, .selectSearchResult, .endNavigation, .goHome, .setHomeHere, .parkHere, .startCircuit:
+            if sheet != .none {
+                sheet = .none
+                pendingPreference = navPref
+            }
+        case .searchChip:
+            searchListScroll = 0
+        default:
+            break
+        }
+        scene = nil
+        return [intent]
+    }
+
+    // MARK: - Overlays (focus ring, toast, link banner, hold)
+
+    /// The focus ring around `r` (P0, D09): the ring's centre line `focusOutset` dp outside the control,
+    /// following its corners (`radius` dp) or its circle; black 5 dp under white 3 dp (0…5 dp outside).
+    static func focusRingCommands(_ r: DashRect, circular: Bool, radius: Double, c: DashLayoutContext) -> [DashDrawCommand] {
+        let out = c.dp(DashPalette.focusOutset)
+        let ring = r.insetBy(dx: -out, dy: -out)
+        let path: DashPath
+        if circular {
+            path = DashPath.ellipse(in: ring)
+        } else {
+            let rad = min(c.dp(radius), min(r.width, r.height) / 2) + out
+            path = DashPath.roundedRect(ring, radius: rad)
+        }
+        return [
+            .stroke(path, DashStroke(width: c.dp(DashPalette.focusEdgeWidth), color: DashPalette.focusEdge, cap: .butt, join: .round)),
+            .stroke(path, DashStroke(width: c.dp(DashPalette.focusStrokeWidth), color: DashPalette.focusStroke, cap: .butt, join: .round)),
+        ]
+    }
+
+    private func ringVisible(now: TimeInterval) -> Bool {
+        guard model.handlebarFocus, focus.focusedId != nil else { return false }
+        if let hide = options.hideFocusRingAfterTouch, let t = lastTouchAt, now - t < hide {
+            if let k = lastKeyAt, k >= t { return true }
+            return false
+        }
+        return true
+    }
+
+    private func overlays(_ sc: DashScene, now: TimeInterval) -> [DashDrawCommand] {
+        let c = layoutContext
+        var cmds: [DashDrawCommand] = []
+        // Focus ring (P0, D09): outline only, never a fill over the control; circular for round controls. The
+        // music tile's outset ring (fix F3) became the rule for every control: 0…5 dp outside it, black with a
+        // white core. In a scroll container the ring is clipped to the viewport grown by its 5 dp.
+        if ringVisible(now: now), let id = focus.focusedId, let w = sc.widget(id), !w.rect.isEmpty {
+            let band = c.dp(DashPalette.focusEdgeWidth)
+            let clip = w.container.flatMap { sc.containers[$0]?.viewport }.map { $0.insetBy(dx: -band, dy: -band) }
+            if let clip { cmds += [.save, .clip(DashPath.rect(clip))] }
+            cmds += Self.focusRingCommands(w.fullRect, circular: w.circular,
+                                           radius: id == DashFocusEngine.musicTileId ? DashDimens.musicTileRadius : DashPalette.focusRadius,
+                                           c: c)
+            if clip != nil { cmds.append(.restore) }
+        }
+        var top = sc.topChromeBottom
+        if sheet == .search { top = c.safe.minY + c.dp(DashDimens.searchHeaderHeight) + c.dp(8) }
+        // Link banner (amber)
+        if let banner = model.linkBanner, !banner.isEmpty {
+            let font = c.font(14, .bold)
+            let (r, lines) = DashLayout.overlayPill(c, text: banner, font: font, topY: top)
+            cmds.append(.fill(DashPath.roundedRect(r, radius: min(r.height / 2, c.dp(18))), DashPalette.bannerFill, .nonZero))
+            cmds.append(.text(banner, r.insetBy(dx: c.dp(16), dy: 0),
+                              DashTextStyle(font: font, color: DashPalette.bannerText, alignment: .center, maxLines: lines)))
+            top = r.maxY + c.dp(6)
+        }
+        // Toast
+        if let t = toast?.text ?? model.toastText, !t.isEmpty {
+            let font = c.font(15, .medium)
+            let (r, lines) = DashLayout.overlayPill(c, text: t, font: font, topY: top)
+            cmds.append(.fill(DashPath.roundedRect(r, radius: min(r.height / 2, c.dp(18))), DashPalette.toastFill, .nonZero))
+            cmds.append(.text(t, r.insetBy(dx: c.dp(16), dy: 0),
+                              DashTextStyle(font: font, color: DashPalette.toastText, alignment: .center, maxLines: lines)))
+        }
+        return cmds
+    }
+
+    /// The hold card (P0, D17): on the plain chrome colour, no map and no numbers — a pause glyph, the title,
+    /// "Voice keeps guiding" while a route runs with the voice on, and "Resumes when you open the app,
+    /// stopped". No hit regions: the controller ignores dash input while the model holds.
+    private func holdList(title: String) -> DashDisplayList {
+        let c = layoutContext
+        let L = model.language
+        var lines = [title]
+        if model.nav.mode.isNavigating && model.preferences.voiceOn { lines.append(DashText.holdVoiceGuides.localized(L)) }
+        lines.append(DashText.holdResume.localized(L))
+        let titleFont = c.font(26, .bold), lineFont = c.font(18)
+        let cardW = min(c.safe.width - c.dp(48), c.dp(520))
+        let pad = c.dp(24), gap = c.dp(8)
+        let textW = cardW - 2 * pad
+        let titleLines = DashTextLayout.lineCount(title, maxWidth: textW, font: titleFont, maxLines: 2, measurer: measurer)
+        let titleH = Double(titleLines) * c.lineHeight(titleFont)
+        let rest = lines.dropFirst().map { line -> (String, Int) in
+            (line, DashTextLayout.lineCount(line, maxWidth: textW, font: lineFont, maxLines: 2, measurer: measurer))
+        }
+        let restH = rest.reduce(0) { $0 + Double($1.1) * c.lineHeight(lineFont) + gap }
+        let iconSize = c.dp(44)
+        let cardH = pad + iconSize + c.dp(12) + titleH + restH + pad
+        let card = DashRect(x: c.safe.midX - cardW / 2, y: c.safe.midY - cardH / 2, width: cardW, height: cardH)
+        var cmds: [DashDrawCommand] = []
+        cmds.append(.fill(DashPath.roundedRect(card, radius: c.dp(DashPalette.cardRadius)), DashPalette.cardFill, .nonZero))
+        cmds.append(.stroke(DashPath.roundedRect(card.insetBy(dx: c.dp(0.75), dy: c.dp(0.75)), radius: c.dp(DashPalette.cardRadius)),
+                            DashStroke(width: c.dp(DashPalette.cardEdgeWidth), color: DashPalette.cardEdge, cap: .butt, join: .round)))
+        let iconRect = DashRect(x: card.midX - iconSize / 2, y: card.minY + pad, width: iconSize, height: iconSize)
+        cmds.append(.fill(DashPath.ellipse(in: iconRect), DashPalette.fabFill, .nonZero))
+        cmds += DashIcons.commands(.pause, in: iconRect.insetBy(dx: iconSize * 0.25, dy: iconSize * 0.25), tint: DashPalette.primaryText)
+        var y = iconRect.maxY + c.dp(12)
+        cmds.append(.text(title, DashRect(x: card.minX + pad, y: y, width: textW, height: titleH),
+                          DashTextStyle(font: titleFont, color: DashPalette.primaryText, alignment: .center, maxLines: 2)))
+        y += titleH
+        for (line, n) in rest {
+            y += gap
+            let h = Double(n) * c.lineHeight(lineFont)
+            cmds.append(.text(line, DashRect(x: card.minX + pad, y: y, width: textW, height: h),
+                              DashTextStyle(font: lineFont, color: DashPalette.holdSecondary, alignment: .center, maxLines: 2)))
+            y += h
+        }
+        return DashDisplayList(size: model.canvas, background: model.chromeColor, commands: cmds, hitRegions: [])
+    }
+}

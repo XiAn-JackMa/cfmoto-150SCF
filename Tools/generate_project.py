@@ -20,7 +20,7 @@ def uid(name): return hashlib.sha1(name.encode()).hexdigest()[:24].upper()
 def q(value): return json.dumps(str(value))
 objects = []
 def add(key, value): objects.append(f'{uid(key)} = {{ {value} }};'); return uid(key)
-sources = sorted([*root.glob('App/*.swift'), *root.glob('App/*.m'), *root.rglob('Sources/TDSCarKitCore/**/*.swift'), *root.glob('Sources/CTDSCarKitCrypto/*.c')])
+sources = sorted([*root.glob('App/*.swift'), *root.glob('App/*.m'), *root.rglob('Sources/TDSCarKitCore/**/*.swift'), *root.rglob('Sources/OpenCfMotoCore/**/*.swift'), *root.glob('Sources/CTDSCarKitCrypto/*.c')])
 refs = []; builds = []
 for path in sources:
     relative = str(path.relative_to(root))
