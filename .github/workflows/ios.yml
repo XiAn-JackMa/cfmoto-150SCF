@@ -6,8 +6,12 @@
 # device, so `CODE_SIGNING_ALLOWED=NO` produces an unsigned bundle and the IPA is signed locally
 # with Sideloadly (or any tool) against the rider's own Apple ID.
 #
-# No Apple accessory (MFi) identity is needed to build: CarPlay identity is imported into the app
-# after it is installed. Never commit identity material — .gitignore already excludes it.
+# The CarPlay accessory (MFi) identity never enters the repository. It is stored as two base64
+# secrets, converted on the runner by Tools/convert_diplay_identity.swift, staged into
+# App/BundledIdentity/ and picked up by Tools/generate_project.py as bundle resources, so the app
+# loads it with AccessoryIdentityStore.loadFromBundle() and needs no on-device import step.
+# The app's Documents folder is deliberately not shared (no UIFileSharingEnabled), so bundling is
+# the only path that works without Xcode.
 
 name: build-ipa
 
@@ -15,6 +19,11 @@ on:
   push:
     branches: ["**"]
   workflow_dispatch:
+
+env:
+  # Secrets, base64 of the two DiPlay/OpenXPlay "offline-mfi" files.
+  MFI_PK8_SECRET: ${{ secrets.MFI_IDENTITY_PK8_B64 }}
+  MFI_P7B_SECRET: ${{ secrets.MFI_CERT_P7B_B64 }}
 
 jobs:
   build:
@@ -29,12 +38,43 @@ jobs:
         run: |
           set -eux
           xcodebuild -version
-          xcodebuild -showsdks | sed -n '1,40p'
           xcodebuild -list -project TDSCarKit.xcodeproj
+
+      - name: Stage MFi identity (committed offline-mfi/ or secrets)
+        run: |
+          set -euo pipefail
+          # A committed offline-mfi/ wins: this fork is a private test build, and keeping the two
+          # files in the tree avoids the secret round-trip entirely.
+          if [ -f offline-mfi/identity.pk8 ] && [ -f offline-mfi/certificate.p7b ]; then
+            echo "using committed offline-mfi/"
+            ls -l offline-mfi
+            exit 0
+          fi
+          if [ -z "${MFI_PK8_SECRET:-}" ] || [ -z "${MFI_P7B_SECRET:-}" ]; then
+            echo "::warning::MFi identity secrets are absent; building without one. CarPlay will ask for an identity."
+            exit 0
+          fi
+          mkdir -p offline-mfi
+          printf '%s' "$MFI_PK8_SECRET" | openssl base64 -d -A > offline-mfi/identity.pk8
+          printf '%s' "$MFI_P7B_SECRET" | openssl base64 -d -A > offline-mfi/certificate.p7b
+          ls -l offline-mfi
+
+      - name: Convert identity and regenerate the project
+        run: |
+          set -euo pipefail
+          if [ ! -f offline-mfi/identity.pk8 ]; then
+            echo "no identity staged; keeping the committed project"
+            exit 0
+          fi
+          # DiPlay bundle: PKCS#8 EC P-256 key + PKCS#7 chain -> certificate.p7b, leaf.cer, private.x963
+          swift Tools/convert_diplay_identity.swift offline-mfi App/BundledIdentity
+          # Rebuilds TDSCarKit.xcodeproj, adding App/BundledIdentity/* as bundle resources.
+          python3 Tools/generate_project.py
+          ls -l App/BundledIdentity
 
       - name: Build (unsigned)
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           xcodebuild \
             -project TDSCarKit.xcodeproj \
             -scheme TDSCarKit \
@@ -56,11 +96,13 @@ jobs:
           test -n "$APP"
           mkdir -p out/Payload
           cp -R "$APP" out/Payload/
-          # The signing tool replaces/creates these; an unsigned bundle must not carry them.
           rm -rf out/Payload/*.app/_CodeSignature out/Payload/*.app/embedded.mobileprovision || true
           cd out
           zip -qry CarWithin-unsigned.ipa Payload
           ls -lh CarWithin-unsigned.ipa
+          # Prove the identity actually shipped inside the bundle.
+          unzip -l CarWithin-unsigned.ipa | grep -E 'certificate\.p7b|leaf\.cer|private\.x963' || \
+            echo "::warning::identity files are NOT in the IPA"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -77,3 +119,7 @@ jobs:
           name: build-log
           path: build.log
           if-no-files-found: warn
+
+      - name: Remove staged identity
+        if: always()
+        run: rm -rf offline-mfi App/BundledIdentity || true
