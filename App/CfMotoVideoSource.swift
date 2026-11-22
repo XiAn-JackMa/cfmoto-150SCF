@@ -138,20 +138,37 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
         // Short wait only: encoding never happens on this path any more, so a queued frame is
         // either there or about to be. Waiting longer just delays the dash.
-        if let frame = await queue.next(timeout: min(timeout, 0.15)) {
+        if let frame = await queue.next(timeout: min(timeout, 0.025)) {
             lock.lock(); servedCount += 1; lock.unlock()
             return frame
         }
 
         // Nothing new. The dash still expects one frame per pull, and CarPlay falls to 1-2 fps on a
-        // static screen, so resend the last IDR: it costs no encoding, and a dash whose decoder lost
-        // its references can always resume on a keyframe. Re-encoding the last picture (the previous
-        // approach) both burned CPU and produced P-frames such a decoder cannot use.
+        // static screen.
+        //
+        // Re-encoding the cached picture costs one hardware encode and yields a fresh P-frame of a
+        // few hundred bytes, where resending the last IDR sent 26 KB of identical bytes six times a
+        // second (129 MB in fifteen minutes in the field log). The canvas is already letterboxed, so
+        // this does no CoreImage work. The encoder still emits an IDR every second, which is what a
+        // dash needs to resynchronise.
         lock.lock()
-        let keyframe = lastKeyframeAU
+        let prepared = fittedBuffer
         let canvas = self.canvas
         lock.unlock()
-        if let keyframe, canvas != nil {
+        if let prepared, let canvas, let frame = encode(prepared, canvas: canvas) {
+            lock.lock()
+            servedCount += 1; repeatedCount += 1
+            sequence &+= 1
+            let seq = sequence
+            lock.unlock()
+            return EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
+                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
+        }
+        // No picture has been decoded yet: fall back to the keyframe, if any.
+        lock.lock()
+        let keyframe = lastKeyframeAU
+        lock.unlock()
+        if let keyframe {
             lock.lock()
             servedCount += 1; repeatedCount += 1
             sequence &+= 1
@@ -162,7 +179,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         }
 
         // No picture has ever been encoded (CarPlay has not produced anything yet): let it miss.
-        let remaining = max(0, timeout - 0.15)
+        let remaining = max(0, timeout - 0.025)
         if remaining > 0, let frame = await queue.next(timeout: remaining) {
             lock.lock(); servedCount += 1; lock.unlock()
             return frame

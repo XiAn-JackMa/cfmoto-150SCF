@@ -52,6 +52,15 @@ final class CfMotoOutput {
     /// for a test build, but it means the dash sees a new accessory on every start.
     private var signer: PureSwiftHuidSigner?
 
+    /// One UUID per installation, so the dash sees the same phone every time.
+    private static let stablePhoneUUID: String = {
+        let key = "cfmotoPhoneUUID"
+        if let existing = UserDefaults.standard.string(forKey: key), !existing.isEmpty { return existing }
+        let uuid = UUID().uuidString.lowercased()
+        UserDefaults.standard.set(uuid, forKey: key)
+        return uuid
+    }()
+
     func start(localAddress: String, targetAddress: String, port: String) {
         stop()
 
@@ -84,7 +93,10 @@ final class CfMotoOutput {
             profileOverride: .legacy,
             learnedCanvas: nil,
             forceTouchscreen: false,
-            phone: PhoneIdentity(phoneBrand: "Apple", phoneModel: "iPhone",
+            // Stable across sessions and launches: the Android client keeps one UUID for the whole
+            // process, and a dash may treat a changing one as a different phone (fakedash warns
+            // IDENTITY_CHANGED).
+            phone: PhoneIdentity(phoneUUID: Self.stablePhoneUUID, phoneBrand: "Apple", phoneModel: "iPhone",
                                  phoneOsVersion: "35", bluetoothName: "OpenCfMoto"),
             localHost: localAddress.isEmpty ? nil : localAddress,
             dashHost: dash.isEmpty ? nil : dash,
