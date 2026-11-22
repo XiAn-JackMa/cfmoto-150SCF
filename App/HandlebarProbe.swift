@@ -200,10 +200,10 @@ final class HandlebarProbe: @unchecked Sendable {
     /// ▲/▼ arrive as volume steps, so: one step = one notch of the wheel, and a firmware-merged
     /// double (the measured 0.10 jump) = one notch plus a Back, which gives the rider a way out of a
     /// screen without moving their thumb to another button.
-    private func handleVolume(direction: Int, steps: CGFloat) {
+    private func handleVolume(direction: Int, steps: Float) {
         guard onControl != nil else { return }
         let now = Date()
-        if steps >= 0.075 {
+        if steps >= Float(0.075) {
             onControl?(.knobNext)
             onControl?(.back)
             lastVolumeStep = nil
