@@ -16,18 +16,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let controlBrowser = CarPlayControlBrowser()
     /// Handlebar (Bluetooth AVRCP) probe: observe only, no mapping until the bike's output is known.
     private let handlebarProbe = HandlebarProbe()
-    private let handlebarLogView: UITextView = {
-        let view = UITextView()
-        view.isEditable = false
-        view.isSelectable = true
-        view.isScrollEnabled = true
-        view.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        view.backgroundColor = .secondarySystemBackground
-        view.layer.cornerRadius = 8
-        view.textContainerInset = UIEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
-        view.heightAnchor.constraint(equalToConstant: 260).isActive = true
-        return view
-    }()
+    private let handlebarLogView = UITextView()
     private var handlebarLines: [String] = []
     private let receiverBrowser = TDSCarKitReceiverBrowser()
     private let receiverPicker = UIButton(type: .system)
@@ -592,6 +581,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         controlBar.axis = .horizontal; controlBar.distribution = .fillEqually; controlBar.spacing = 8
         controlBar.isHidden = true
         stack.addArrangedSubview(controlBar)
+        handlebarLogView.isEditable = false; handlebarLogView.isSelectable = true
+        handlebarLogView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        handlebarLogView.backgroundColor = .secondarySystemBackground
+        handlebarLogView.layer.cornerRadius = 8
+        handlebarLogView.textContainerInset = UIEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
+        handlebarLogView.heightAnchor.constraint(equalToConstant: 260).isActive = true
         logView.isEditable = false; logView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         logView.backgroundColor = .secondarySystemBackground; logView.layer.cornerRadius = 12
         logView.heightAnchor.constraint(equalToConstant: 220).isActive = true
