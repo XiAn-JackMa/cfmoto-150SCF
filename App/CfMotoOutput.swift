@@ -51,6 +51,8 @@ final class CfMotoOutput {
     /// RSA identity for CLIENT_INFO. Kept for the process lifetime: a fresh key per launch is fine
     /// for a test build, but it means the dash sees a new accessory on every start.
     private var signer: PureSwiftHuidSigner?
+    /// Kept for the process lifetime: one subscription covers every session.
+    private var logSubscription: UUID?
 
     /// One UUID per installation, so the dash sees the same phone every time.
     private static let stablePhoneUUID: String = {
@@ -116,6 +118,24 @@ final class CfMotoOutput {
                                 gateway: dash.isEmpty ? nil : dash)
         lock.lock(); self.link = link; lock.unlock()
 
+        // Core knows why a session ended (watchdog, peer closed, handshake rejected) but reports it
+        // through its own Log. Forward the link-relevant lines into our store, otherwise a field log
+        // shows "reconnecting" with no reason.
+        if logSubscription == nil {
+            logSubscription = Log.shared.subscribe { [weak self] line in
+                guard let self, self.lock.withLock({ self.link != nil }) else { return }
+                guard line.tag == "LINK" || line.tag == "NET" else { return }
+                let interesting = line.level >= .warn
+                    || line.message.contains("watchdog")
+                    || line.message.contains("closed")
+                    || line.message.contains("stall")
+                    || line.message.contains("reconnect")
+                    || line.message.contains("fail")
+                guard interesting else { return }
+                self.store.append("[核心:\(line.tag)] \(line.message)")
+            }
+        }
+
         log("==== EasyConn 目标 \(dash.isEmpty ? "网关" : dash):\(port) · profile=legacy · 测试图案\(testPattern ? "开" : "关") ====")
         log("版本 \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")" +
             " (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))" +
@@ -130,6 +150,11 @@ final class CfMotoOutput {
                 if case .stats(let stats) = event {
                     self.lock.lock(); self.lastStats = stats; self.lock.unlock()
                     continue
+                }
+                if case .canvas(let canvas) = event {
+                    // Remembered for planDisplay(): the next session renders CarPlay 1:1 at the
+                    // canvas instead of letterboxing a 16:9 picture into it.
+                    UserDefaults.standard.set("\(canvas.width)x\(canvas.height)", forKey: "cfmotoCanvas")
                 }
                 let line = Self.describe(event)
                 self.log(line)

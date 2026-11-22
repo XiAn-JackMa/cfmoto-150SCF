@@ -822,6 +822,21 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     /// Size, frame rate and codec for the next session from the settings, the known head-unit
     /// screen and any lighter level chosen by "自动重启".
     private func planDisplay(for screen: CarScreen?) -> DisplayPlan {
+        if outputMode == .cfmoto {
+            // Render CarPlay at the canvas the dash itself asked for. A 16:9 render letterboxed into
+            // the 150SC's 1024x512 (2:1) leaves 57 px of black on each side and costs a rescale that
+            // softens dash text; matching the canvas removes both. The value is remembered from the
+            // last session, so the second run is exact even though the first has to guess.
+            let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
+            var width = 1024, height = 512
+            if let stored = UserDefaults.standard.string(forKey: "cfmotoCanvas") {
+                let parts = stored.split(separator: "x")
+                if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]), w >= 320, h >= 320 {
+                    width = w / 2 * 2; height = h / 2 * 2
+                }
+            }
+            return DisplayPlan(width: width, height: height, fps: 30, codec: .h264, iconWidthMM: icon)
+        }
         if outputMode == .zeeho {
             let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
             return DisplayPlan(width: 1024, height: 480, fps: 30, codec: .h264, iconWidthMM: icon)
@@ -2758,7 +2773,8 @@ extension ReceiverViewController {
         return [
             SettingsSection("春风 EasyConn（MotoPlay）",
                 footer: "iPhone 先加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面后再启动 CarPlay。" +
-                        "地址留空表示使用本机当前 Wi-Fi 网关。画面固定为车机要求的画布（150SC 为 1024×512），" +
+                        "地址留空表示使用本机当前 Wi-Fi 网关。CarPlay 会按车机要求的画布 1:1 渲染（150SC 为 1024×512），" +
+                        "所以上面「画面 › 尺寸/分辨率/宽高比」在本模式下不生效，也不会有黑边。" +
                         "声音走 iPhone 或蓝牙，触控暂不支持。", [
                     .field("车机 IP 地址", cfmotoAddressField, placeholder: "192.168.0.1"),
                     .field("EasyConn 端口", cfmotoPortField, placeholder: "10930"),

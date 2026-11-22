@@ -70,6 +70,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var dropCooldown = 0
     private var dropNoDecoder = 0
     private var dropNoPicture = 0
+    /// AUs that carried only SPS/PPS. CarPlay splits them off about 40% of the time; skipping them is
+    /// correct (the decoder is configured from `parameters`), so they must not look like lost frames.
+    private var parameterSetOnly = 0
     private var dropNoCallback = 0
     private var decodeErrors = 0
     /// Idle pulls answered by re-encoding the last picture.
@@ -90,7 +93,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     var counters: String {
         lock.lock(); defer { lock.unlock() }
         let format = nonH264 > 0 ? "H.265×\(nonH264)" : (parametersReady ? "H.264 就绪" : "H.264 等 SPS")
-        let drops = "丢弃[等IDR \(dropWaitingIDR)/冷却 \(dropCooldown)/无解码器 \(dropNoDecoder)/无画面 \(dropNoPicture)/无回调 \(dropNoCallback)/异常 \(decodeErrors)]"
+        let drops = "丢弃[等IDR \(dropWaitingIDR)/冷却 \(dropCooldown)/无解码器 \(dropNoDecoder)/空帧 \(dropNoPicture)/无回调 \(dropNoCallback)/异常 \(decodeErrors)]" +
+            " · 参数集 \(parameterSetOnly)"
         return "CarPlay \(inbound) · \(format) · SPS×\(paramSets) · 解码 \(decodedCount) · 编码 \(encodedCount) · 拉帧 \(pulls) · 送出 \(servedCount) · 重发 \(repeatedCount) · \(drops)"
     }
 
@@ -267,10 +271,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     private func decode(_ data: Data, keyframe: Bool) -> CVPixelBuffer? {
         var picture: [Data] = []
+        var sawParameterSet = false
 
         do {
             for unit in try AnnexB.units(in: data) {
                 if VideoCodec.h264.parameterSet(unit) != nil {
+                    sawParameterSet = true
                     if parameters.absorb(unit) {
                         lock.lock(); waitingForIDR = true; paramSets += 1
                         parametersReady = parameters.isComplete; lock.unlock()
@@ -307,7 +313,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 return nil
             }
             guard !picture.isEmpty else {
-                lock.lock(); dropNoPicture += 1; lock.unlock()
+                lock.lock()
+                if sawParameterSet { parameterSetOnly += 1 } else { dropNoPicture += 1 }
+                lock.unlock()
                 return nil
             }
             try decoder.decode(AnnexB.lengthPrefixed(picture),
