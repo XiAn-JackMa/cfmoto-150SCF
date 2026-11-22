@@ -22,7 +22,14 @@ final class CfMotoOutput {
     /// instance after Stop would leave the next session with a queue nothing can push into.
     private var source = CfMotoVideoSource()
     /// Serve colour bars instead of CarPlay frames (bench test of the link alone).
-    var testPattern = false
+    private(set) var testPattern = false
+
+    /// Live toggle: applies to the running link as well as the next start.
+    func setTestPattern(_ on: Bool) {
+        testPattern = on
+        source.setTestPattern(on)
+        log("测试图案 \(on ? "已开启" : "已关闭")")
+    }
     private let lock = NSLock()
     private var link: EasyConnLink?
     private var pump: Task<Void, Never>?
@@ -30,6 +37,16 @@ final class CfMotoOutput {
     private var lastState = "未启动"
     /// Last few diagnostic lines, so the copy button also carries the *reason* a stage failed.
     private var recent: [String] = []
+    /// File-backed log: survives a crash or an app kill at the bike.
+    let store = CfMotoLogStore()
+    /// Latest link statistics, so the periodic line carries the dash's own view.
+    private var lastStats: LinkStats?
+
+    /// One line to both the store (persistent) and whoever shows it (settings screen, :10950).
+    private func log(_ line: String) {
+        store.append(line)
+        onLog?(line)
+    }
     /// RSA identity for CLIENT_INFO. Kept for the process lifetime: a fresh key per launch is fine
     /// for a test build, but it means the dash sees a new accessory on every start.
     private var signer: PureSwiftHuidSigner?
@@ -46,6 +63,7 @@ final class CfMotoOutput {
             self.recent.append(line)
             if self.recent.count > 12 { self.recent.removeFirst(self.recent.count - 12) }
             self.lock.unlock()
+            self.store.append(line)
             self.onLog?(line)
         }
         source.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?() }
@@ -85,35 +103,45 @@ final class CfMotoOutput {
                                 gateway: dash.isEmpty ? nil : dash)
         lock.lock(); self.link = link; lock.unlock()
 
-        onLog?("CFMOTO EasyConn → \(dash.isEmpty ? "gateway" : dash):\(port) profile=legacy")
+        log("==== EasyConn 目标 \(dash.isEmpty ? "网关" : dash):\(port) · profile=legacy · 测试图案\(testPattern ? "开" : "关") ====")
+        log("版本 \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")" +
+            " (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))" +
+            " · \(UIDevice.current.model) iOS \(UIDevice.current.systemVersion)" +
+            " · 本机IP \(localAddress.isEmpty ? "-" : localAddress)")
         onState?("正在连接春风车机…")
+        log("等待车机在 10930 响应探测…")
 
         pump = Task { [weak self] in
             for await event in link.events {
                 guard let self else { return }
-                self.onLog?("CFMOTO event: \(String(describing: event))")
-                // Every event used to raise the status label, and a status change rebuilds the
-                // settings table, so the frequent ones (.stats, .touch) made scrolling that page
-                // re-enter its own data source. Only the milestones drive the card; the ticker
-                // below carries the counters.
-                switch event {
-                case .state, .dashIdentified, .canvas, .mediaStarted:
-                    break
-                case .stats, .touch:
+                if case .stats(let stats) = event {
+                    self.lock.lock(); self.lastStats = stats; self.lock.unlock()
                     continue
                 }
-                let text = Self.describe(event)
-                self.lastState = text
+                let line = Self.describe(event)
+                self.log(line)
+                let cardText = line.split(separator: "\n").first.map(String.init) ?? ""
+                self.lastState = cardText
                 // UIKit labels are updated from here, so hop to main.
-                DispatchQueue.main.async { self.onState?(text) }
+                DispatchQueue.main.async {
+                    self.onState?(cardText.replacingOccurrences(of: "[状态] ", with: ""))
+                }
             }
         }
         // Frame counters every two seconds: a pull with no frame is the failure to look for.
         ticker = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard let self, self.lock.withLock({ self.link != nil }) else { return }
-                self.onLog?("CFMOTO \(self.lastState) | \(self.source.counters)")
+                let (state, stats) = self.lock.withLock { (self.lastState, self.lastStats) }
+                if let stats {
+                    self.log("[车机] 送出=\(stats.framesSent) 关键帧=\(stats.keyframesSent)" +
+                        " 字节=\(stats.bytesSent / 1024)KB 漏拉=\(stats.missedPulls)" +
+                        " 速率=\(String(format: "%.1f", stats.pullRate)) 状态=\(state.replacingOccurrences(of: "[状态] ", with: ""))")
+                } else {
+                    self.log("[车机] 尚无数据 状态=\(state.replacingOccurrences(of: "[状态] ", with: ""))")
+                }
+                self.log("[管道] \(self.source.counters)")
                 // Counters go to the log view only. Raising the status label here would rebuild the
                 // settings table every few seconds, which fights the log field the rider is reading.
             }
@@ -165,24 +193,31 @@ final class CfMotoOutput {
         switch event {
         case .state(let state):
             switch state {
-            case .streaming: return "正在投屏 · 车机已连接"
-            case .handshaking: return "已找到车机，握手中…"
-            case .awaitingCallback: return "等待车机回连…"
-            case .probing(let attempt): return "正在探测车机（第 \(attempt) 次）…"
-            case .startingServers: return "正在监听 10920-10922…"
-            case .idle: return "未启动"
-            default: return "状态：\(state)"
+            case .streaming: return "[状态] 正在投屏 · 车机已连接"
+            case .handshaking: return "[状态] 已找到车机，握手中"
+            case .awaitingCallback: return "[状态] 等待车机回连"
+            case .probing(let attempt): return "[状态] 探测车机第 \(attempt) 次"
+            case .startingServers: return "[状态] 监听 10920-10922"
+            case .idle: return "[状态] 已停止"
+            default: return "[状态] \(state)"
             }
         case .dashIdentified(let info):
-            return "已识别车机：\(info)"
+            // Compact on purpose: the full object is unreadable on a phone and floods the file.
+            var lines = ["[握手] 车机 \(info.huName) HUID=\(info.huid) 通道=\(info.channel)" +
+                         " SDK=\(info.sdkVersion) 触控=\(info.supportsScreenTouch ? "是" : "否")" +
+                         " 超时=\(info.socketTimeoutSeconds.map(String.init) ?? "-")s" +
+                         " profile=\(info.profile)"]
+            if !info.rawJSON.isEmpty { lines.append("[握手] 原始 CLIENT_INFO: \(info.rawJSON)") }
+            return lines.joined(separator: "\n")
         case .canvas(let canvas):
-            return "车机画布 \(canvas.width)×\(canvas.height)（请求 \(canvas.requestedWidth)×\(canvas.requestedHeight)）"
+            return "[画布] \(canvas.width)×\(canvas.height)（车机请求 \(canvas.requestedWidth)×\(canvas.requestedHeight)）"
         case .mediaStarted:
-            return "车机开始拉流"
+            return "[视频] 车机开始拉流"
         case .touch(let touch):
-            return "触摸：\(touch)"
+            return "[触控] \(touch)"
         case .stats(let stats):
-            return "统计：\(stats)"
+            return "[车机] 送出=\(stats.framesSent) 关键帧=\(stats.keyframesSent)" +
+                " 字节=\(stats.bytesSent / 1024)KB 漏拉=\(stats.missedPulls)"
         }
     }
 }

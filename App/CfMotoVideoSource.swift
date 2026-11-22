@@ -116,13 +116,14 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
         log?("CFMOTO canvas \(canvas.width)x\(canvas.height) (dash asked \(canvas.requestedWidth)x\(canvas.requestedHeight)) " +
              "bitrate=\(parameters.bitrate) fps=\(parameters.frameRate)")
-        startPatternIfNeeded()
         if sizeChanged {
             // A keyframe of the previous canvas must never answer a pull for this one.
             lock.lock(); fittedBuffer = nil; lock.unlock()
             queue.invalidateKeyframe()
             queue.resynchronize()
         }
+        // After the queue reset above, so the pattern's first keyframe is not flushed by it.
+        startPatternIfNeeded()
     }
 
     func resynchronize() {
@@ -447,9 +448,27 @@ private final class DecodeBox: @unchecked Sendable {
 // MARK: - Test pattern
 
 extension CfMotoVideoSource {
+    /// Turns the synthetic source on or off while the link is live, not just at start.
+    func setTestPattern(_ on: Bool) {
+        testPattern = on
+        if on {
+            startPatternIfNeeded()
+        } else {
+            patternTask?.cancel(); patternTask = nil
+            log?("CFMOTO 测试图案已停止")
+        }
+    }
+
     /// Starts the synthetic source once a canvas is known. Idempotent.
     fileprivate func startPatternIfNeeded() {
         guard testPattern, patternTask == nil else { return }
+        if lock.withLock({ canvas == nil }) {
+            // The canvas only exists after the dash asks for it (REQ 16); say so instead of
+            // looking broken when nothing happens yet.
+            log?("CFMOTO 测试图案已开启，等车机请求画布后开始发送")
+        } else {
+            log?("CFMOTO 测试图案开始发送")
+        }
         patternTask = Task { [weak self] in
             var tick = 0
             while !Task.isCancelled {

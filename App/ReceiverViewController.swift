@@ -53,7 +53,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }()
     private var receivesAudioFromAnotherDevice: Bool { modeControl.selectedSegmentIndex == 0 }
     private var soundOutput: SoundOutput {
-        if outputMode == .carLife || outputMode == .airPlay || outputMode.usesInstrumentWiFi { return .phone }
+        if outputMode == .carLife || outputMode == .airPlay || outputMode.usesInstrumentWiFi || outputMode.isEasyConn { return .phone }
         if selectedSoundOutput == .carWithin && !receivesAudioFromAnotherDevice { return .phone }
         if selectedSoundOutput == .browser && !videoOutputSwitch.isOn { return .phone }
         return selectedSoundOutput
@@ -176,6 +176,22 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             cfmotoLogView.scrollRangeToVisible(NSRange(location: (cfmotoLogView.text as NSString).length, length: 0))
         }
     }
+    /// Re-reads the persistent log (after clearing, or on demand).
+    private func reloadCfMotoLog() {
+        let text = receiver.cfmotoLogText
+        cfmotoLogLines = text.isEmpty ? [] : text.components(separatedBy: "\n")
+        cfmotoLogView.text = text
+        cfmotoLogView.scrollRangeToVisible(NSRange(location: (text as NSString).length, length: 0))
+    }
+    /// Sends the log file through the share sheet: at the bike, one tap beats copying text.
+    private func shareCfMotoLog() {
+        guard let url = receiver.cfmotoLogFile else { return }
+        let sheet = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        sheet.popoverPresentationController?.sourceView = cfmotoLogView
+        sheet.popoverPresentationController?.sourceRect = cfmotoLogView.bounds
+        // Present from whatever is on top, not from the root while the settings are pushed.
+        (settingsNavigation ?? self).present(sheet, animated: true)
+    }
     private func updateCfMotoStatus(_ message: String) {
         cfmotoStatus.text = message; cfmotoCardStatus.text = message
     }
@@ -205,10 +221,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private lazy var pictureInPicture = CarPlayPictureInPicture(surface: videoSurface)
     private let keepAlive = BackgroundKeepAlive()
     private let keepAliveSwitch = UISwitch()
-    private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay", "台铃 4.3 寸", "九号 5 寸", "极核 6.2 寸"])
+    private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay", "台铃 4.3 寸", "九号 5 寸", "极核 6.2 寸", "春风 EasyConn"])
     private enum HeadUnitOutput: Int {
-        case browser, carLife, airPlay, tailing, ninebot, zeeho
+        // Append new modes at the end: the saved value is the raw index.
+        case browser, carLife, airPlay, tailing, ninebot, zeeho, cfmoto
         var usesInstrumentWiFi: Bool { self == .tailing || self == .ninebot || self == .zeeho }
+        /// Carries video only; the phone keeps the sound.
+        var isEasyConn: Bool { self == .cfmoto }
     }
     private var airPlayStreamID: UUID?
     private var airPlayStreamURL: URL?
@@ -292,6 +311,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 "display": displayPage, "screens": screensPage, "wifi": wifiPage, "presets": presetsPage,
                 "vehicle": vehiclePage, "sound": soundPage, "output": headUnitPage,
                 "tailing": { [unowned self] in self.headUnitOutput.selectedSegmentIndex = HeadUnitOutput.tailing.rawValue; self.refreshVideoOutputSummary(); return self.headUnitPage() },
+                "cfmoto": { [unowned self] in self.headUnitOutput.selectedSegmentIndex = HeadUnitOutput.cfmoto.rawValue; self.refreshVideoOutputSummary(); self.refreshHeroHint(); return self.headUnitPage() },
                 "web": headUnitPage, "log": logPage, "lab": diagnosticsPage, "about": aboutPage,
                 "usage": usagePage, "updates": aboutPage, "https": httpsSettingsPage]
             if arguments.indices.contains(index + 1), let make = pages[arguments[index + 1]] {
@@ -479,6 +499,15 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         tailingSettings.addAction(UIAction { [weak self] _ in self?.revealSettings(output: true) }, for: .touchUpInside)
         tailingCard.addArrangedSubview(tailingSettings)
         stack.addArrangedSubview(tailingCard)
+        configureConnectionCard(cfmotoCard, title: "春风 EasyConn 连接", symbol: "motorcycle", color: .systemGreen,
+            instructions: "让 iPhone 加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面，再启动 CarPlay。",
+            status: cfmotoCardStatus)
+        let cfmotoSettings = UIButton(type: .system)
+        cfmotoSettings.configuration = .tinted()
+        cfmotoSettings.configuration?.title = "连接设置"
+        cfmotoSettings.addAction(UIAction { [weak self] _ in self?.revealSettings(output: true) }, for: .touchUpInside)
+        cfmotoCard.addArrangedSubview(cfmotoSettings)
+        stack.addArrangedSubview(cfmotoCard)
 
         configureConnectionCard(airPlayCard, title: "AirPlay 连接", symbol: "airplayvideo", color: .systemBlue,
             instructions: "接收设备与 iPhone 连同一 Wi-Fi。启动 CarPlay 后，可在这里选择设备。",
@@ -1036,6 +1065,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         tailingCard.isHidden = !showsLocalOutput || outputMode != .tailing
         if !running { updateTailingStatus("等待启动 CarPlay · 仪表 IP：\(tailingAddressField.text ?? "192.168.1.1")") }
         carLifeCard.isHidden = !showsLocalOutput || outputMode != .carLife
+        cfmotoCard.isHidden = !showsLocalOutput || outputMode != .cfmoto
+        if !running { updateCfMotoStatus("等待启动 CarPlay · 车机 IP：\(cfmotoAddressField.text ?? "192.168.0.1")") }
         airPlayCard.isHidden = !showsLocalOutput || outputMode != .airPlay
         browserCard.isHidden = outputMode != .browser || !videoOutputSwitch.isOn
         guard outputMode == .browser, videoOutputSwitch.isOn else { return }
@@ -1112,12 +1143,42 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         config.carLifeEnabled = outputMode == .carLife
         let carLifeAddress = (carLifeAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
         config.carLifeAddress = !config.carLifeEnabled || carLifeAddress.isEmpty ? nil : carLifeAddress
-        // EasyConn runs alongside the selected mode; an empty address disables it.
+        // EasyConn is its own output mode now (like 极核): it runs only when selected.
         let cfmotoAddress = (cfmotoAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
-        config.cfmotoAddress = cfmotoAddress.isEmpty ? nil : cfmotoAddress
+        config.cfmotoAddress = outputMode.isEasyConn && !cfmotoAddress.isEmpty ? cfmotoAddress : nil
         let cfmotoPort = (cfmotoPortField.text ?? "").trimmingCharacters(in: .whitespaces)
         config.cfmotoPort = cfmotoPort.isEmpty ? "10930" : cfmotoPort
-        config.cfmotoTestPattern = cfmotoTestSwitch.isOn
+        config.cfmotoTestPattern = outputMode.isEasyConn && cfmotoTestSwitch.isOn
+    }
+    /// Hero text: it names the selected output, so switching modes updates the home page hint.
+    private func refreshHeroHint() {
+        let local = modeControl.selectedSegmentIndex == 1
+        let remote = modeControl.selectedSegmentIndex == 2
+        explanation.text = remote ? "选择一台 iPad，把这台 iPhone 的 CarPlay 投送到它的屏幕。"
+            : local ? "无需外接盒子，直接在这台 iPhone 上启动并显示 CarPlay。" : "接收另一台 iPhone 的导航、音乐和触控画面。"
+        connectionHelp.text = remote
+            ? "让 iPhone 和 iPad 连接同一个 Wi-Fi。"
+            : local ? localOutputHelp
+            : "先启动此接收屏，再从另一台 iPhone 发起连接。"
+    }
+    /// Home-page hint for the local mode: it follows the output selected in 输出设置.
+    private var localOutputHelp: String {
+        switch outputMode {
+        case .cfmoto:
+            return "让 iPhone 加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面后启动 CarPlay。"
+        case .zeeho:
+            return "让 iPhone 加入极核仪表 Wi-Fi，仪表打开投屏后启动 CarPlay。"
+        case .ninebot:
+            return "让 iPhone 加入九号仪表 Wi-Fi，仪表打开投屏后启动 CarPlay。"
+        case .tailing:
+            return "让 iPhone 加入台铃仪表 Wi-Fi，仪表打开投屏后启动 CarPlay。"
+        case .carLife:
+            return "让 iPhone 加入车机 Wi-Fi，在车机端选择手机互联后启动。"
+        case .airPlay:
+            return "让接收设备与 iPhone 连同一 Wi-Fi，启动 CarPlay 后选择设备。"
+        case .browser:
+            return "先在系统设置连接 Wi-Fi，再在 CarWithin 选择对应预设。"
+        }
     }
     @objc private func toggleSettings() { revealSettings() }
     @objc private func driveChanged() {
@@ -1672,12 +1733,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             ]))
         }
         heading.attributedText = headingText
-        explanation.text = remote ? "选择一台 iPad，把这台 iPhone 的 CarPlay 投送到它的屏幕。"
-            : local ? "无需外接盒子，直接在这台 iPhone 上启动并显示 CarPlay。" : "接收另一台 iPhone 的导航、音乐和触控画面。"
-        connectionHelp.text = remote
-            ? "让 iPhone 和 iPad 连接同一个 Wi-Fi。"
-            : local ? "先在系统设置连接 Wi-Fi，再在 CarWithin 选择对应预设。"
-            : "先启动此接收屏，再从另一台 iPhone 发起连接。"
+        refreshHeroHint()
         refreshNetworkSummary()
         refreshVideoOutputSummary()
         startButton.isEnabled = identity != nil
@@ -1706,7 +1762,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         tailingAddressField.isEnabled = value
         cfmotoAddressField.isEnabled = value
         cfmotoPortField.isEnabled = value
-        cfmotoTestSwitch.isEnabled = value
+        // Live toggle: it must stay tappable while the link runs, unlike the address fields.
+        cfmotoTestSwitch.isEnabled = true
         carLifeAddressField.isEnabled = value
     }
     @objc private func willResignActive() {
@@ -1952,7 +2009,7 @@ extension ReceiverViewController {
         cfmotoAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
         cfmotoPortField.text = defaults.string(forKey: "cfmotoPort") ?? "10930"
         cfmotoTestSwitch.isOn = defaults.bool(forKey: "cfmotoTestPattern")
-        cfmotoTestSwitch.addTarget(self, action: #selector(saveHeadUnitOutput), for: .valueChanged)
+        cfmotoTestSwitch.addTarget(self, action: #selector(cfmotoTestPatternChanged), for: .valueChanged)
         cfmotoPortField.keyboardType = .numberPad
         cfmotoPortField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
         if let crash = CrashCatcher.previousException() {
@@ -2008,9 +2065,17 @@ extension ReceiverViewController {
         UserDefaults.standard.set(cfmotoTestSwitch.isOn, forKey: "cfmotoTestPattern")
         refreshVideoOutputSummary()
     }
+    /// The pattern switch applies to a running link, so it must not wait for the next Start.
+    @objc private func cfmotoTestPatternChanged() {
+        UserDefaults.standard.set(cfmotoTestSwitch.isOn, forKey: "cfmotoTestPattern")
+        receiver.setCfMotoTestPattern(cfmotoTestSwitch.isOn)
+        appendCfMotoLog("测试图案：\(cfmotoTestSwitch.isOn ? "开" : "关")")
+    }
+
     @objc private func headUnitOutputChanged() {
         saveHeadUnitOutput()
         refreshVideoOutputSummary()
+        refreshHeroHint()
         updateVideoAspect()
         reloadVisibleSettings()
     }
@@ -2592,10 +2657,10 @@ extension ReceiverViewController {
                     .field("仪表 IP 地址", ninebotAddressField, placeholder: "192.168.1.1"),
                     .note(ninebotStatus)
                 ])]
+            case .cfmoto:
+                sections = cfmotoOutputSections()
             }
-            // The CFMOTO EasyConn output runs alongside whichever mode is selected: it needs only an
-            // address, so it does not take a slot in the output-mode picker.
-            return sections + cfmotoOutputSections()
+            return sections
         }
     }
 
@@ -2612,6 +2677,7 @@ extension ReceiverViewController {
         if configuration.zeehoAddress != nil { updateZeehoStatus("正在连接极核仪表…") }
         if configuration.ninebotAddress != nil { updateNinebotStatus("正在连接九号仪表…") }
         if configuration.tailingAddress != nil { updateTailingStatus("正在连接台铃仪表…") }
+        if configuration.cfmotoAddress != nil { updateCfMotoStatus("正在连接春风车机…") }
         if configuration.carLifeEnabled {
             updateCarLifeStatus("正在等待车机连接…")
         }
@@ -2687,7 +2753,9 @@ extension ReceiverViewController {
     }
 
     private func cfmotoOutputSections() -> [SettingsSection] {
-        [
+        // Repopulate from the file so a log from an earlier session is visible too.
+        reloadCfMotoLog()
+        return [
             SettingsSection("春风 EasyConn（MotoPlay）",
                 footer: "iPhone 先加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面后再启动 CarPlay。" +
                         "地址留空表示使用本机当前 Wi-Fi 网关。画面固定为车机要求的画布（150SC 为 1024×512），" +
@@ -2696,17 +2764,23 @@ extension ReceiverViewController {
                     .field("EasyConn 端口", cfmotoPortField, placeholder: "10930"),
                     .control("测试图案（不接 CarPlay）", cfmotoTestSwitch)
                 ]),
-            SettingsSection("连接状态", footer: "上面是全部 EasyConn 日志，可滚动、可长按全选。也可以在同网段的电脑上取：curl http://<手机IP>:10950/ （长度前缀 + UTF-8）。", [
+            SettingsSection("连接状态", footer: "日志同时写入 Documents/CarWithin-easyconn.log，崩溃或强退都不会丢。车边测试推荐直接「分享日志文件」，可 AirDrop / 微信 / 存到「文件」。", [
                 .view(cfmotoLogView),
+                .action("分享日志文件", icon: ("square.and.arrow.up", .systemBlue)) { [weak self] in
+                    self?.shareCfMotoLog()
+                },
                 .action("复制日志", icon: ("doc.on.doc", .systemBlue)) { [weak self] in
-                    UIPasteboard.general.string = self?.cfmotoLogView.text
+                    UIPasteboard.general.string = self?.receiver.cfmotoLogText
                 },
                 .action("复制诊断摘要", icon: ("doc.text.magnifyingglass", .systemTeal)) { [weak self] in
                     UIPasteboard.general.string = self?.receiver.cfmotoDiagnostics ?? "EasyConn 未运行"
                 },
+                .action("刷新", icon: ("arrow.clockwise", .systemGray)) { [weak self] in
+                    self?.reloadCfMotoLog()
+                },
                 .action("清空日志", icon: ("trash", .systemGray), destructive: true) { [weak self] in
-                    self?.cfmotoLogLines.removeAll()
-                    self?.cfmotoLogView.text = ""
+                    self?.receiver.clearCfMotoLog()
+                    self?.reloadCfMotoLog()
                 }
             ])
         ]

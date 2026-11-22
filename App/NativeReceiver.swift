@@ -59,6 +59,13 @@ final class NativeReceiver {
     var onCfMotoState: ((String) -> Void)?
     /// Snapshot for the settings screen's copy button.
     var cfmotoDiagnostics: String { cfmoto.diagnostics }
+    /// Applies the test pattern to a running link, not only to the next start.
+    func setCfMotoTestPattern(_ on: Bool) { cfmoto.setTestPattern(on) }
+    /// Full EasyConn log, as shown on screen and served on :10950.
+    var cfmotoLogText: String { cfmoto.store.text }
+    /// The same log as a file, for the share sheet (works with AirDrop / WeChat / Files).
+    var cfmotoLogFile: URL? { cfmoto.store.fileForSharing() }
+    func clearCfMotoLog() { cfmoto.store.clear() }
     /// Every EasyConn log line, for the settings screen's text view.
     var onCfMotoLog: ((String) -> Void)?
     private lazy var carLink = CarLinkRelay(queue: queue)
@@ -140,7 +147,7 @@ final class NativeReceiver {
                 // Read the log from a PC instead of copying it off the phone by hand.
                 self.cfmotoLogServer.start { [weak self] in
                     guard let self else { return "" }
-                    return self.cfmotoDiagnostics + "\n\n" + self.cfmoto.logDump
+                    return self.cfmotoDiagnostics + "\n\n" + self.cfmotoLogText
                 }
             }
             if configuration.carLifeEnabled {
