@@ -111,11 +111,8 @@ final class CfMotoOutput {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard let self, self.lock.withLock({ self.link != nil }) else { return }
                 self.onLog?("CFMOTO \(self.lastState) | \(self.source.counters)")
-                // The card is the only place a rider can read this; the settings screen adds a
-                // copy button because the log list has no copy affordance.
-                DispatchQueue.main.async {
-                    self.onState?("\(self.lastState) | \(self.source.counters)")
-                }
+                // Counters go to the log view only. Raising the status label here would rebuild the
+                // settings table every few seconds, which fights the log field the rider is reading.
             }
         }
         link.start()

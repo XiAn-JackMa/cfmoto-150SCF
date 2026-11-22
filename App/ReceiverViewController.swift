@@ -151,6 +151,30 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoAddressField = UITextField()
     private let cfmotoPortField = UITextField()
     private let cfmotoStatus = StatusLabel()
+    /// Every EasyConn line in one scrollable, selectable field: a one-line label cannot be read or
+    /// copied while the link is reconnecting.
+    private let cfmotoLogView: UITextView = {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = true
+        view.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        view.backgroundColor = .secondarySystemBackground
+        view.layer.cornerRadius = 8
+        view.textContainerInset = UIEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
+        view.heightAnchor.constraint(equalToConstant: 240).isActive = true
+        return view
+    }()
+    private var cfmotoLogLines: [String] = []
+    private func appendCfMotoLog(_ line: String) {
+        guard Thread.isMainThread else { DispatchQueue.main.async { [weak self] in self?.appendCfMotoLog(line) }; return }
+        cfmotoLogLines.append(line)
+        if cfmotoLogLines.count > 400 { cfmotoLogLines.removeFirst(cfmotoLogLines.count - 400) }
+        cfmotoLogView.text = cfmotoLogLines.joined(separator: "\n")
+        if !cfmotoLogView.isFirstResponder {
+            cfmotoLogView.scrollRangeToVisible(NSRange(location: (cfmotoLogView.text as NSString).length, length: 0))
+        }
+    }
     private func updateCfMotoStatus(_ message: String) {
         cfmotoStatus.text = message; cfmotoCardStatus.text = message
     }
@@ -588,6 +612,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self.updateTailingStatus(message)
         }
         // No output-mode gate: EasyConn is enabled by its address, whatever mode is selected.
+        receiver.onCfMotoLog = { [weak self] line in self?.appendCfMotoLog(line) }
         receiver.onCfMotoState = { [weak self] message in
             guard let self, self.running else { return }
             self.updateCfMotoStatus(message)
@@ -2664,12 +2689,17 @@ extension ReceiverViewController {
                     .field("车机 IP 地址", cfmotoAddressField, placeholder: "192.168.0.1"),
                     .field("EasyConn 端口", cfmotoPortField, placeholder: "10930")
                 ]),
-            SettingsSection("连接状态", footer: "此输出与上面选择的投屏方式同时运行，可独立开关。日志一闪而过时，用下面的按钮把当前诊断信息复制出来。", [
-                .note(cfmotoStatus),
-                .action("复制诊断信息", icon: ("doc.on.doc", .systemBlue)) { [weak self] in
-                    let text = self?.receiver.cfmotoDiagnostics ?? "EasyConn 未运行"
-                    UIPasteboard.general.string = text
-                    self?.log("已复制：\(text)")
+            SettingsSection("连接状态", footer: "上面是全部 EasyConn 日志，可滚动、可长按全选。回传给开发者时点「复制日志」。", [
+                .view(cfmotoLogView),
+                .action("复制日志", icon: ("doc.on.doc", .systemBlue)) { [weak self] in
+                    UIPasteboard.general.string = self?.cfmotoLogView.text
+                },
+                .action("复制诊断摘要", icon: ("doc.text.magnifyingglass", .systemTeal)) { [weak self] in
+                    UIPasteboard.general.string = self?.receiver.cfmotoDiagnostics ?? "EasyConn 未运行"
+                },
+                .action("清空日志", icon: ("trash", .systemGray), destructive: true) { [weak self] in
+                    self?.cfmotoLogLines.removeAll()
+                    self?.cfmotoLogView.text = ""
                 }
             ])
         ]

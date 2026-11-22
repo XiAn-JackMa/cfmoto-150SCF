@@ -58,6 +58,8 @@ final class NativeReceiver {
     var onCfMotoState: ((String) -> Void)?
     /// Snapshot for the settings screen's copy button.
     var cfmotoDiagnostics: String { cfmoto.diagnostics }
+    /// Every EasyConn log line, for the settings screen's text view.
+    var onCfMotoLog: ((String) -> Void)?
     private lazy var carLink = CarLinkRelay(queue: queue)
     var onCarLifeState: ((String) -> Void)?
     var onCarLinkState: ((String) -> Void)?
@@ -123,7 +125,10 @@ final class NativeReceiver {
                 self.tailing.start(localAddress: configuration.address, targetAddress: target, phone: phone)
             }
             if let target = configuration.cfmotoAddress {
-                self.cfmoto.onLog = { [weak self] in self?.log($0) }
+                self.cfmoto.onLog = { [weak self] in
+                    self?.onCfMotoLog?($0)
+                    self?.log($0)
+                }
                 self.cfmoto.onState = { [weak self] in self?.onCfMotoState?($0) }
                 self.cfmoto.onKeyframeRequest = { [weak self] in
                     self?.requestKeyFrame(reason: "CFMOTO 解码恢复")

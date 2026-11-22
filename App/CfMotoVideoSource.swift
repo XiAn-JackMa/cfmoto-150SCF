@@ -20,6 +20,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     private var parameters = VideoParameterSets(codec: .h264)
     private var decoder: TailingH264Decoder?
+    /// One box per decoder: the decoder's output closure captures it for its whole lifetime, so a
+    /// per-call box would receive every picture after the first into a box nobody reads.
+    private var decodeBox = DecodeBox()
     private var encoder: H264Encoder?
     private var canvas: VideoCanvas?
     private var encoderSettings = EncoderParameters()
@@ -183,11 +186,6 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     private func decode(_ data: Data, keyframe: Bool) -> CVPixelBuffer? {
         var picture: [Data] = []
-        // The decoder's callbacks land on its own thread, so hand the result back through a box
-        // instead of locals captured by escaping closures: reading a local right after
-        // waitForFrames() can see nil while the picture arrives a moment later, which dropped
-        // every frame after the first.
-        let box = DecodeBox()
 
         do {
             for unit in try AnnexB.units(in: data) {
@@ -212,12 +210,14 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                     return nil
                 }
                 // Build outside the lock: a throwing initialiser must not leave it held.
+                let freshBox = DecodeBox()
                 let rebuilt = try TailingH264Decoder(configuration: parameters.decoderConfigurationRecord(),
-                    output: { box.set(image: $0) },
-                    failure: { box.set(error: $0) })
+                    output: { freshBox.set(image: $0) },
+                    failure: { freshBox.set(error: $0) })
                 lock.lock()
                 decoder?.invalidate()
                 decoder = rebuilt
+                decodeBox = freshBox
                 waitingForIDR = false
                 lock.unlock()
             }
@@ -233,6 +233,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                                presentationTimeMicroseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000_000),
                                isKeyframe: keyframe)
             decoder.waitForFrames()
+            // Read the box after the rebuild above, so it is the one this decoder writes to.
+            let box = lock.withLock { decodeBox }
             if let image = box.take() { return image }
             if let failure = box.error { throw failure }
             lock.lock(); dropNoCallback += 1; lock.unlock()
@@ -361,7 +363,10 @@ private final class DecodeBox: @unchecked Sendable {
     func take(timeout: TimeInterval = 0.05) -> CVPixelBuffer? {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         while true {
-            lock.lock(); let value = image; lock.unlock()
+            lock.lock()
+            let value = image
+            if value != nil { image = nil }   // consume: one picture answers one frame
+            lock.unlock()
             if let value { return value }
             if ProcessInfo.processInfo.systemUptime >= deadline { return nil }
             Thread.sleep(forTimeInterval: 0.002)
