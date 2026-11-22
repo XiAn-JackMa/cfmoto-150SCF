@@ -23,6 +23,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// One box per decoder: the decoder's output closure captures it for its whole lifetime, so a
     /// per-call box would receive every picture after the first into a box nobody reads.
     private var decodeBox = DecodeBox()
+    /// Latest decoded picture. CarPlay drops to 1-2 fps on a static screen while the dash pulls at
+    /// ~20 fps, so idle pulls are answered by re-encoding this picture instead of returning nothing.
+    private var latestImage: CVPixelBuffer?
+    /// VideoToolbox encodes are serialized: the work queue and the pull path both encode.
+    private let encodeLock = NSLock()
     private var encoder: H264Encoder?
     private var canvas: VideoCanvas?
     private var encoderSettings = EncoderParameters()
@@ -56,6 +61,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var dropNoPicture = 0
     private var dropNoCallback = 0
     private var decodeErrors = 0
+    /// Idle pulls answered by re-encoding the last picture.
+    private var repeatedCount = 0
     /// `parameters` is mutated on the work queue; this flag is the lock-protected view of it.
     private var parametersReady = false
     /// Throttles per-frame diagnostics so a stalled pipeline says why once, not 30 times a second.
@@ -73,7 +80,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let format = nonH264 > 0 ? "H.265×\(nonH264)" : (parametersReady ? "H.264 就绪" : "H.264 等 SPS")
         let drops = "丢弃[等IDR \(dropWaitingIDR)/冷却 \(dropCooldown)/无解码器 \(dropNoDecoder)/无画面 \(dropNoPicture)/无回调 \(dropNoCallback)/异常 \(decodeErrors)]"
-        return "CarPlay \(inbound) · \(format) · SPS×\(paramSets) · 解码 \(decodedCount) · 编码 \(encodedCount) · 拉帧 \(pulls) · 送出 \(servedCount) · \(drops)"
+        return "CarPlay \(inbound) · \(format) · SPS×\(paramSets) · 解码 \(decodedCount) · 编码 \(encodedCount) · 拉帧 \(pulls) · 送出 \(servedCount) · 重发 \(repeatedCount) · \(drops)"
     }
 
     init(queueCapacity: Int = 3) {
@@ -114,9 +121,39 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
         lock.lock(); pulls += 1; lock.unlock()
-        let frame = await queue.next(timeout: timeout)
-        if frame != nil { lock.lock(); servedCount += 1; lock.unlock() }
-        return frame
+
+        if let frame = await queue.next(timeout: min(timeout, 0.12)) {
+            lock.lock(); servedCount += 1; lock.unlock()
+            return frame
+        }
+
+        // The dash pulls at ~20 fps whether or not CarPlay produced anything new: input drops to
+        // 1-2 fps on a static screen. Answer from the last picture instead of returning nothing,
+        // which the link treats as a miss and eventually tears the session down for.
+        lock.lock()
+        let idle = latestImage
+        let canvas = self.canvas
+        lock.unlock()
+        if let idle, let canvas, let frame = encode(idle, canvas: canvas) {
+            lock.lock(); servedCount += 1; repeatedCount += 1; lock.unlock()
+            return EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
+                                presentationTime: ProcessInfo.processInfo.systemUptime,
+                                sequence: nextSequence())
+        }
+
+        // Nothing has ever been decoded yet (no CarPlay picture): let the pull miss.
+        let remaining = max(0, timeout - 0.12)
+        if remaining > 0, let frame = await queue.next(timeout: remaining) {
+            lock.lock(); servedCount += 1; lock.unlock()
+            return frame
+        }
+        return nil
+    }
+
+    private func nextSequence() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        sequence &+= 1
+        return sequence
     }
 
     func mediaStopped() {
@@ -235,7 +272,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             decoder.waitForFrames()
             // Read the box after the rebuild above, so it is the one this decoder writes to.
             let box = lock.withLock { decodeBox }
-            if let image = box.take() { return image }
+            if let image = box.take() {
+                lock.lock(); latestImage = image; lock.unlock()
+                return image
+            }
             if let failure = box.error { throw failure }
             lock.lock(); dropNoCallback += 1; lock.unlock()
             diagnose("decoder produced no picture (keyframe=\(keyframe) units=\(picture.count))")
@@ -257,6 +297,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     // MARK: - Encode
 
     private func encode(_ image: CVPixelBuffer, canvas: VideoCanvas) -> H264EncodedFrame? {
+        // The work queue encodes new pictures while an idle pull may encode the last one.
+        encodeLock.lock()
+        defer { encodeLock.unlock() }
         let now = ProcessInfo.processInfo.systemUptime
 
         do {
