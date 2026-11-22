@@ -19,6 +19,7 @@
 import AVFoundation
 import Foundation
 import MediaPlayer
+import UIKit
 
 /// One raw event as observed on the phone.
 struct HandlebarRawSample: Identifiable, Sendable, Equatable {
@@ -42,7 +43,12 @@ final class HandlebarProbe: @unchecked Sendable {
     /// no seek events at all, so there is no server-side hold.
     private let doubleTapWindow: TimeInterval = 0.55
     private let selectHoldDelay: TimeInterval = 0.60
-    private var lastVolumeStep: (direction: Int, at: Date)?
+    /// Last ▲ and ▼ press, per direction: a second press on the same arrow inside the window is a
+    /// double (the firmware merges a very fast one into a single bigger step, handled below).
+    private var lastArrow: [Int: Date] = [:]
+    /// Volume before we dial it back, so a ▲▼ press does not accumulate to full scale.
+    private var restoringVolume = false
+    private var savedVolume: Float?
     private var selectDown: Date?
     private var selectHoldTimer: Timer?
     private var selectFired: [(tap: Date, action: CarPlayControl)] = []
@@ -187,35 +193,78 @@ final class HandlebarProbe: @unchecked Sendable {
         let session = AVAudioSession.sharedInstance()
         record("起始音量", String(format: "%.2f", session.outputVolume))
         volumeObservation = session.observe(\.outputVolume, options: [.old, .new]) { [weak self] _, change in
-            guard let old = change.oldValue, let new = change.newValue, old != new else { return }
+            guard let self, let old = change.oldValue, let new = change.newValue, old != new else { return }
+            // Our own dial-back must not look like another press.
+            guard !self.restoringVolume else { return }
             let steps = abs(new - old)
-            self?.record(new > old ? "音量+" : "音量−",
-                         String(format: "%.2f → %.2f（%.3f，约 %d 格）", old, new, steps, Int((steps * 16).rounded())))
-            self?.handleVolume(direction: new > old ? 1 : -1, steps: steps)
+            self.record(new > old ? "音量+" : "音量−",
+                        String(format: "%.2f → %.2f（%.3f，约 %d 格）", old, new, steps, Int((steps * 16).rounded())))
+            self.handleVolume(direction: new > old ? 1 : -1, steps: steps)
         }
     }
 
     // MARK: - Raw events → CarPlay controls
+    //
+    // What this dashboard gives the phone (measured, and matches the owner's manual):
+    //   ▲▼ short   absolute-volume step (+/- 0.05) — and the manual says it also means "previous /
+    //              next item" on menus, which is what we map it to. Because the volume really moves,
+    //              every step is undone below, or 20 presses would leave ▲ with nothing to send.
+    //   ▲▼ long    previousTrack / nextTrack — a separate, clean event.
+    //   SET long   togglePlayPause.
+    //   SET short  consumed by the dash (opens its settings menu) — the phone never sees it.
+    //   BACK       consumed by the dash — the phone never sees it.
+    // So confirm and back cannot come from their own buttons and are built from doubles.
 
-    /// ▲/▼ arrive as volume steps, so: one step = one notch of the wheel, and a firmware-merged
-    /// double (the measured 0.10 jump) = one notch plus a Back, which gives the rider a way out of a
-    /// screen without moving their thumb to another button.
+    /// ▲/▼ short press: one notch of the wheel, or (second press on the same arrow) Back / Select.
     private func handleVolume(direction: Int, steps: Float) {
+        restoreVolume(direction: direction, steps: steps)
         guard onControl != nil else { return }
         let now = Date()
+
+        // A fast double is merged by the firmware into one bigger jump; that is a double by itself.
         if steps >= Float(0.075) {
-            onControl?(.knobNext)
-            onControl?(.back)
-            lastVolumeStep = nil
+            lastArrow.removeAll()
+            onControl?(direction > 0 ? .back : .select)
             return
         }
+
+        if let last = lastArrow[direction], now.timeIntervalSince(last) < doubleTapWindow {
+            lastArrow.removeAll()
+            // ▲▲ = Back, ▼▼ = Select: the two actions the dash does not hand us.
+            onControl?(direction > 0 ? .back : .select)
+            return
+        }
+        lastArrow[direction] = now
+        // Singles fire at once: the manual's "short press = previous/next" is a one-press action and
+        // waiting out the double window would be felt on every step.
         onControl?(direction > 0 ? .knobPrevious : .knobNext)
-        lastVolumeStep = (direction, now)
     }
 
-    /// Enter is a discrete play/pause event with no release, so a hold has to be timed: fire after
-    /// `selectHoldDelay` if nothing indicates a release, and treat a press inside the double-tap
-    /// window as a double instead of a second single.
+    /// Puts the system volume back where the press found it, so ▲▼ stay usable at full scale.
+    ///
+    /// The dash reads its own arrow as a volume key, so the phone's volume is a side effect of
+    /// navigating. Restoring it needs no UI: `MPVolumeView`'s slider is the supported way to write
+    /// `outputVolume`, and the change it makes is filtered out so it is not taken for another press.
+    private func restoreVolume(direction: Int, steps: Float) {
+        let session = AVAudioSession.sharedInstance()
+        let target = max(0, min(1, session.outputVolume - (direction > 0 ? steps : -steps)))
+        restoringVolume = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let slider = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
+            for view in slider.subviews {
+                guard let control = view as? UISlider else { continue }
+                control.value = target
+                control.sendActions(for: .touchUpInside)
+                break
+            }
+            // The write echoes back through the observer; ignore it, then allow presses again.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.restoringVolume = false }
+        }
+    }
+
+    /// SET long press = play/pause on this dash, so it is the only clean "enter" we get: a short
+    /// pause here is treated as Select, holding it reaches Home.
     private func handleSelect() {
         guard onControl != nil else { return }
         let now = Date()
@@ -234,8 +283,6 @@ final class HandlebarProbe: @unchecked Sendable {
             self.selectFired.removeAll()
             self.onControl?(.home)
         }
-        // A single settles quickly instead of waiting out the whole window: the dash's enter is
-        // usually a deliberate press, and 550 ms of lag on every select would be felt.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self, self.selectDown != nil else { return }
             self.selectDown = nil
@@ -245,11 +292,15 @@ final class HandlebarProbe: @unchecked Sendable {
         }
     }
 
-    /// The firmware sometimes sends a bare track key with no volume step. Treat it as the same
-    /// notch, so a press never gets lost.
+    /// ▲/▼ long press: a clean track key with no volume side effect.
     private func handleTrack(forward: Bool) {
         guard onControl != nil else { return }
+        leftArrowCleared(forward ? 1 : -1)
         onControl?(forward ? .knobNext : .knobPrevious)
+    }
+
+    private func leftArrowCleared(_ direction: Int) {
+        lastArrow[direction] = nil
     }
 
     // MARK: - Now Playing claim (what makes the keys arrive at all)
