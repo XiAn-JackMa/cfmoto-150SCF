@@ -40,6 +40,19 @@ jobs:
           xcodebuild -version
           xcodebuild -list -project TDSCarKit.xcodeproj
 
+      - name: Stamp build version
+        run: |
+          set -euo pipefail
+          # Every run gets its own version, so a downloaded IPA can be told apart at a glance:
+          # short version 1.0.<run>, build number <run>. Both are visible in the app's About page.
+          SHORT="1.0.${{ github.run_number }}"
+          BUILD="${{ github.run_number }}"
+          echo "APP_VERSION=$SHORT" >> "$GITHUB_ENV"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $SHORT" App/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" App/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" App/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" App/Info.plist
+
       - name: Stage MFi identity (committed offline-mfi/ or secrets)
         run: |
           set -euo pipefail
@@ -98,17 +111,21 @@ jobs:
           cp -R "$APP" out/Payload/
           rm -rf out/Payload/*.app/_CodeSignature out/Payload/*.app/embedded.mobileprovision || true
           cd out
-          zip -qry CarWithin-unsigned.ipa Payload
-          ls -lh CarWithin-unsigned.ipa
-          # Prove the identity actually shipped inside the bundle.
-          unzip -l CarWithin-unsigned.ipa | grep -E 'certificate\.p7b|leaf\.cer|private\.x963' || \
+          NAME="CarWithin-${APP_VERSION}-unsigned.ipa"
+          zip -qry "$NAME" Payload
+          echo "IPA_NAME=$NAME" >> "$GITHUB_ENV"
+          ls -lh "$NAME"
+          # Prove what shipped: the version this build reports, and the bundled identity.
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+            "$(find Payload -maxdepth 1 -name '*.app' | head -1)/Info.plist"
+          unzip -l "$NAME" | grep -E 'certificate\.p7b|leaf\.cer|private\.x963' || \
             echo "::warning::identity files are NOT in the IPA"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: CarWithin-unsigned
-          path: out/CarWithin-unsigned.ipa
+          name: CarWithin-${{ env.APP_VERSION }}-unsigned
+          path: out/${{ env.IPA_NAME }}
           if-no-files-found: error
 
       # Build logs are what makes a red run diagnosable without a Mac.
