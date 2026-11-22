@@ -18,7 +18,9 @@ final class CfMotoOutput {
     /// CarPlay must produce a fresh keyframe (the dash's decoder resynchronised).
     var onKeyframeRequest: (() -> Void)?
 
-    private let source = CfMotoVideoSource()
+    /// Recreated on every start: shutting a source down closes its frame queue, so reusing the
+    /// instance after Stop would leave the next session with a queue nothing can push into.
+    private var source = CfMotoVideoSource()
     private let lock = NSLock()
     private var link: EasyConnLink?
     private var pump: Task<Void, Never>?
@@ -28,13 +30,14 @@ final class CfMotoOutput {
     /// for a test build, but it means the dash sees a new accessory on every start.
     private var signer: PureSwiftHuidSigner?
 
-    init() {
-        source.log = { [weak self] in self?.onLog?($0) }
-        source.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?() }
-    }
-
     func start(localAddress: String, targetAddress: String, port: String) {
         stop()
+
+        // A fresh frame source per session (see the property comment).
+        source = CfMotoVideoSource()
+        source.log = { [weak self] in self?.onLog?($0) }
+        source.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?() }
+        lastState = "未启动"
 
         let signer: PureSwiftHuidSigner
         if let existing = self.signer {

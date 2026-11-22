@@ -27,6 +27,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var waitingForIDR = true
     private var sequence: UInt64 = 0
     private var lastCodecFailure = -Double.infinity
+    private var lastKeyframe = -Double.infinity
+    /// Result of the in-flight encode, written by the VideoToolbox callback under `lock`.
+    private var encodedResult: Result<H264EncodedFrame, Error>?
     private var pending = 0
     private var skipping = false
     private var stopped = false
@@ -41,10 +44,15 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var encodedCount = 0   // re-encoded into an access unit
     private var pulls = 0          // REQ_RV_DATA_NEXT (114) served or timed out
     private var servedCount = 0    // frames actually handed to the link
+    private var nonH264 = 0        // access units dropped because CarPlay sent H.265
+    private var paramSets = 0      // SPS/PPS absorbed from the stream
+    /// `parameters` is mutated on the work queue; this flag is the lock-protected view of it.
+    private var parametersReady = false
 
     var counters: String {
         lock.lock(); defer { lock.unlock() }
-        return "CarPlay \(inbound) · 解码 \(decodedCount) · 编码 \(encodedCount) · 拉帧 \(pulls) · 送出 \(servedCount)"
+        let format = nonH264 > 0 ? "H.265×\(nonH264)" : (parametersReady ? "H.264 就绪" : "H.264 等 SPS")
+        return "CarPlay \(inbound) · \(format) · SPS×\(paramSets) · 解码 \(decodedCount) · 编码 \(encodedCount) · 拉帧 \(pulls) · 送出 \(servedCount)"
     }
 
     init(queueCapacity: Int = 3) {
@@ -107,7 +115,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     /// Called by the receiver for every access unit CarPlay produces. Never blocks the caller.
     func append(_ data: Data, codec: VideoCodec, keyframe: Bool) {
-        guard codec == .h264 else { return }
+        guard codec == .h264 else {
+            // CarPlay negotiated HEVC: EasyConn carries H.264, so nothing can be sent.
+            lock.lock(); nonH264 += 1; lock.unlock()
+            return
+        }
         lock.lock(); inbound += 1; lock.unlock()
         lock.lock()
         let reject = stopped || pending >= 6
@@ -152,7 +164,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         do {
             for unit in try AnnexB.units(in: data) {
                 if VideoCodec.h264.parameterSet(unit) != nil {
-                    if parameters.absorb(unit) { lock.lock(); waitingForIDR = true; lock.unlock() }
+                    if parameters.absorb(unit) { lock.lock(); waitingForIDR = true; paramSets += 1; parametersReady = parameters.isComplete; lock.unlock() }
                 } else {
                     picture.append(unit)
                 }
@@ -164,11 +176,13 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                     onKeyframeRequest?()
                     return nil
                 }
-                lock.lock()
-                decoder?.invalidate()
-                decoder = try TailingH264Decoder(configuration: parameters.decoderConfigurationRecord(),
+                // Build outside the lock: a throwing initialiser must not leave it held.
+                let rebuilt = try TailingH264Decoder(configuration: parameters.decoderConfigurationRecord(),
                     output: { image in decoded = image },
                     failure: { failure = $0 })
+                lock.lock()
+                decoder?.invalidate()
+                decoder = rebuilt
                 waitingForIDR = false
                 lock.unlock()
             }
@@ -196,29 +210,46 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     private func encode(_ image: CVPixelBuffer, canvas: VideoCanvas) -> H264EncodedFrame? {
         let now = ProcessInfo.processInfo.systemUptime
-        var result: Result<H264EncodedFrame, Error>?
 
         do {
             lock.lock()
             if encoder == nil {
                 guard now - lastCodecFailure >= 0.5 else { lock.unlock(); return nil }
                 let settings = encoderSettings
+                // The VideoToolbox callback runs on its own thread, so hand the result back through
+                // the lock instead of a local variable captured by the escaping closure.
                 encoder = try H264Encoder(width: canvas.width, height: canvas.height,
-                                          fps: settings.frameRate, bitrate: settings.bitrate) { outcome in
-                    result = outcome
+                                          fps: settings.frameRate, bitrate: settings.bitrate) { [weak self] outcome in
+                    guard let self else { return }
+                    self.lock.lock(); self.encodedResult = outcome; self.lock.unlock()
                 }
+                encodedResult = nil
                 lock.unlock()
             } else {
                 lock.unlock()
             }
             guard let encoder else { return nil }
-            let force = lock.withLock { waitingForIDR }
+
+            // The dash decodes a clean IDR at least once per second (a real dash runs GOP 1 s), and
+            // its pull loop can start mid-stream, so force one instead of waiting for a keyframe that
+            // may never come from CarPlay.
+            let stale = now - lastKeyframe >= 1.0
+            let force = lock.withLock { waitingForIDR } || stale
             try encoder.encode(try fitted(image, width: canvas.width, height: canvas.height),
                                presentationTime: CMTime(seconds: now, preferredTimescale: 1_000_000),
                                forceKeyframe: force)
             encoder.complete()
-            if force { lock.lock(); waitingForIDR = false; lock.unlock() }
-            return try result?.get()
+
+            let outcome = lock.withLock { () -> Result<H264EncodedFrame, Error>? in
+                defer { encodedResult = nil }
+                return encodedResult
+            }
+            let frame = try outcome?.get()
+            if frame?.isKeyframe == true {
+                lastKeyframe = now
+                lock.lock(); waitingForIDR = false; lock.unlock()
+            }
+            return frame
         } catch H264EncoderError.frameDropped {
             return nil
         } catch {
