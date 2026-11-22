@@ -10,6 +10,7 @@
 // the dash itself in REQ_RV_DATA_START (16), so no size is hard-coded.
 
 import Foundation
+import UIKit
 
 final class CfMotoOutput {
     /// Lifecycle text for the settings screen and the log.
