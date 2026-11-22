@@ -22,6 +22,8 @@ final class CfMotoOutput {
     private let lock = NSLock()
     private var link: EasyConnLink?
     private var pump: Task<Void, Never>?
+    private var ticker: Task<Void, Never>?
+    private var lastState = "未启动"
     /// RSA identity for CLIENT_INFO. Kept for the process lifetime: a fresh key per launch is fine
     /// for a test build, but it means the dash sees a new accessory on every start.
     private var signer: PureSwiftHuidSigner?
@@ -49,7 +51,7 @@ final class CfMotoOutput {
             learnedCanvas: nil,
             forceTouchscreen: false,
             phone: PhoneIdentity(phoneBrand: "Apple", phoneModel: "iPhone",
-                                 phoneOsVersion: "35", bluetoothName: "OpenXPlay"),
+                                 phoneOsVersion: "35", bluetoothName: "OpenCfMoto"),
             localHost: localAddress.isEmpty ? nil : localAddress,
             dashHost: dash.isEmpty ? nil : dash,
             connectBackTimeout: 10,
@@ -74,8 +76,20 @@ final class CfMotoOutput {
         pump = Task { [weak self] in
             for await event in link.events {
                 guard let self else { return }
+                let text = Self.describe(event)
+                self.lastState = text
                 self.onLog?("CFMOTO event: \(String(describing: event))")
-                self.onState?(Self.describe(event))
+                // UIKit labels are updated from here, so hop to main.
+                DispatchQueue.main.async { self.onState?(text) }
+            }
+        }
+        // Frame counters every two seconds: a pull with no frame is the failure to look for.
+        ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, self.lock.withLock({ self.link != nil }) else { return }
+                let text = "\(self.lastState) · \(self.source.counters)"
+                DispatchQueue.main.async { self.onState?(text) }
             }
         }
         link.start()
@@ -88,6 +102,7 @@ final class CfMotoOutput {
 
     func stop() {
         pump?.cancel(); pump = nil
+        ticker?.cancel(); ticker = nil
         lock.lock()
         let current = link
         link = nil

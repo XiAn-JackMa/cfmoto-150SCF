@@ -35,6 +35,18 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     var onKeyframeRequest: (() -> Void)?
     var log: ((String) -> Void)?
 
+    /// Counters for the status card: where a pull stalls is what the rider needs to see.
+    private var inbound = 0        // access units arriving from CarPlay
+    private var decodedCount = 0   // decoded to a picture
+    private var encodedCount = 0   // re-encoded into an access unit
+    private var pulls = 0          // REQ_RV_DATA_NEXT (114) served or timed out
+    private var servedCount = 0    // frames actually handed to the link
+
+    var counters: String {
+        lock.lock(); defer { lock.unlock() }
+        return "CarPlay \(inbound) · 解码 \(decodedCount) · 编码 \(encodedCount) · 拉帧 \(pulls) · 送出 \(servedCount)"
+    }
+
     init(queueCapacity: Int = 3) {
         queue = FrameQueue(capacity: queueCapacity)
         queue.onKeyframeNeeded = { [weak self] in self?.onKeyframeRequest?() }
@@ -72,7 +84,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     }
 
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
-        await queue.next(timeout: timeout)
+        lock.lock(); pulls += 1; lock.unlock()
+        let frame = await queue.next(timeout: timeout)
+        if frame != nil { lock.lock(); servedCount += 1; lock.unlock() }
+        return frame
     }
 
     func mediaStopped() {
@@ -93,6 +108,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Called by the receiver for every access unit CarPlay produces. Never blocks the caller.
     func append(_ data: Data, codec: VideoCodec, keyframe: Bool) {
         guard codec == .h264 else { return }
+        lock.lock(); inbound += 1; lock.unlock()
         lock.lock()
         let reject = stopped || pending >= 6
         if reject { skipping = !skipping }
@@ -114,7 +130,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         guard alive, let canvas else { return }
 
         guard let image = decode(data, keyframe: keyframe) else { return }
+        lock.lock(); decodedCount += 1; lock.unlock()
         guard let frame = encode(image, canvas: canvas) else { return }
+        lock.lock(); encodedCount += 1; lock.unlock()
 
         lock.lock()
         sequence &+= 1
