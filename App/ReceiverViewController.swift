@@ -145,6 +145,15 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private func updateTailingStatus(_ message: String) {
         tailingStatus.text = message; tailingCardStatus.text = message
     }
+    // EasyConn ("MotoPlay") output to a CFMOTO / Carbit dashboard.
+    private let cfmotoCard = UIStackView()
+    private let cfmotoCardStatus = UILabel()
+    private let cfmotoAddressField = UITextField()
+    private let cfmotoPortField = UITextField()
+    private let cfmotoStatus = StatusLabel()
+    private func updateCfMotoStatus(_ message: String) {
+        cfmotoStatus.text = message; cfmotoCardStatus.text = message
+    }
     private let carLifeCard = UIStackView()
     private let airPlayCard = UIStackView()
     private let carLifeCardStatus = UILabel()
@@ -577,6 +586,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         receiver.onTailingState = { [weak self] message in
             guard let self, self.running, self.outputMode == .tailing else { return }
             self.updateTailingStatus(message)
+        }
+        // No output-mode gate: EasyConn is enabled by its address, whatever mode is selected.
+        receiver.onCfMotoState = { [weak self] message in
+            guard let self, self.running else { return }
+            self.updateCfMotoStatus(message)
         }
         receiver.onCarLifeState = { [weak self] message in
             guard let self, self.running, self.outputMode == .carLife else { return }
@@ -1072,6 +1086,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         config.carLifeEnabled = outputMode == .carLife
         let carLifeAddress = (carLifeAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
         config.carLifeAddress = !config.carLifeEnabled || carLifeAddress.isEmpty ? nil : carLifeAddress
+        // EasyConn runs alongside the selected mode; an empty address disables it.
+        let cfmotoAddress = (cfmotoAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
+        config.cfmotoAddress = cfmotoAddress.isEmpty ? nil : cfmotoAddress
+        let cfmotoPort = (cfmotoPortField.text ?? "").trimmingCharacters(in: .whitespaces)
+        config.cfmotoPort = cfmotoPort.isEmpty ? "10930" : cfmotoPort
     }
     @objc private func toggleSettings() { revealSettings() }
     @objc private func driveChanged() {
@@ -1658,6 +1677,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         zeehoAddressField.isEnabled = value
         ninebotAddressField.isEnabled = value
         tailingAddressField.isEnabled = value
+        cfmotoAddressField.isEnabled = value
+        cfmotoPortField.isEnabled = value
         carLifeAddressField.isEnabled = value
     }
     @objc private func willResignActive() {
@@ -1898,6 +1919,13 @@ extension ReceiverViewController {
         carLifeAddressField.text = defaults.string(forKey: "carLifeAddress")
         carLifeAddressField.keyboardType = .decimalPad
         carLifeAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
+        cfmotoAddressField.text = defaults.string(forKey: "cfmotoAddress") ?? "192.168.0.1"
+        cfmotoAddressField.keyboardType = .decimalPad
+        cfmotoAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
+        cfmotoPortField.text = defaults.string(forKey: "cfmotoPort") ?? "10930"
+        cfmotoPortField.keyboardType = .numberPad
+        cfmotoPortField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
+        updateCfMotoStatus("等待启动 CarPlay。")
         updateCarLifeStatus("等待启动 CarPlay。")
         updateAirPlayStatus("等待启动 CarPlay。")
         videoOutputSwitch.isOn = defaults.object(forKey: "videoOutputEnabled") as? Bool ?? true
@@ -1939,6 +1967,8 @@ extension ReceiverViewController {
         UserDefaults.standard.set(zeehoAddressField.text ?? "", forKey: "zeehoAddress")
         UserDefaults.standard.set(ninebotAddressField.text ?? "", forKey: "ninebotAddress")
         UserDefaults.standard.set(tailingAddressField.text ?? "", forKey: "tailingAddress")
+        UserDefaults.standard.set(cfmotoAddressField.text ?? "", forKey: "cfmotoAddress")
+        UserDefaults.standard.set(cfmotoPortField.text ?? "", forKey: "cfmotoPort")
         refreshVideoOutputSummary()
     }
     @objc private func headUnitOutputChanged() {
@@ -2509,22 +2539,26 @@ extension ReceiverViewController {
 
     fileprivate func headUnitPage() -> SettingsPageController {
         page("输出设置") { [unowned self] in
+            let sections: [SettingsSection]
             switch outputMode {
-            case .browser: return browserOutputSections()
-            case .carLife: return carLifeOutputSections()
-            case .airPlay: return airPlayOutputSections()
-            case .tailing: return tailingOutputSections()
+            case .browser: sections = browserOutputSections()
+            case .carLife: sections = carLifeOutputSections()
+            case .airPlay: sections = airPlayOutputSections()
+            case .tailing: sections = tailingOutputSections()
             case .zeeho:
-                return [SettingsSection("极核 AE4 MAX2+ 6.2 寸", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。声音由 iPhone 或蓝牙输出。", [
+                sections = [SettingsSection("极核 AE4 MAX2+ 6.2 寸", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。声音由 iPhone 或蓝牙输出。", [
                     .field("仪表 IP 地址", zeehoAddressField, placeholder: "192.168.0.1"),
                     .note(zeehoStatus)
                 ])]
             case .ninebot:
-                return [SettingsSection("九号 5 寸", footer: "iPhone 加入仪表 Wi-Fi 后，选择对应的 Wi-Fi 预设。先结束其他投屏，再打开仪表的投屏功能。声音由 iPhone 或蓝牙输出，触控在手机上操作。", [
+                sections = [SettingsSection("九号 5 寸", footer: "iPhone 加入仪表 Wi-Fi 后，选择对应的 Wi-Fi 预设。先结束其他投屏，再打开仪表的投屏功能。声音由 iPhone 或蓝牙输出，触控在手机上操作。", [
                     .field("仪表 IP 地址", ninebotAddressField, placeholder: "192.168.1.1"),
                     .note(ninebotStatus)
                 ])]
             }
+            // The CFMOTO EasyConn output runs alongside whichever mode is selected: it needs only an
+            // address, so it does not take a slot in the output-mode picker.
+            return sections + cfmotoOutputSections()
         }
     }
 
@@ -2612,6 +2646,19 @@ extension ReceiverViewController {
                 .field("仪表 IP 地址", tailingAddressField, placeholder: "192.168.1.1")
             ]),
             SettingsSection(footer: "仪表输出固定为 480×272、JPEG，最高 20 FPS。本机 CarPlay 使用 H.264、960×544、30 FPS。声音由 iPhone／蓝牙输出；仪表不回传触控。", [.note(tailingStatus)])
+        ]
+    }
+
+    private func cfmotoOutputSections() -> [SettingsSection] {
+        [
+            SettingsSection("春风 EasyConn（MotoPlay）",
+                footer: "iPhone 先加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面后再启动 CarPlay。" +
+                        "地址留空表示使用本机当前 Wi-Fi 网关。画面固定为车机要求的画布（150SC 为 1024×512），" +
+                        "声音走 iPhone 或蓝牙，触控暂不支持。", [
+                    .field("车机 IP 地址", cfmotoAddressField, placeholder: "192.168.0.1"),
+                    .field("EasyConn 端口", cfmotoPortField, placeholder: "10930")
+                ]),
+            SettingsSection("连接状态", footer: "此输出与上面选择的投屏方式同时运行，可独立开关。", [.note(cfmotoStatus)])
         ]
     }
 
