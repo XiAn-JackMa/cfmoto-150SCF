@@ -3030,7 +3030,9 @@ extension ReceiverViewController {
                         self.reloadVisibleSettings()
                     }
                 ]),
-                SettingsSection(footer: "记录下来发给开发者即可决定映射。", [
+                self.handlebarMappingSection(),
+                self.handlebarTimingSection(),
+                SettingsSection(footer: "记录下来发给开发者即可排查。", [
                     .view(self.handlebarLogView),
                     .action("复制记录", icon: ("doc.on.doc", .systemBlue)) {
                         UIPasteboard.general.string = self.handlebarLogView.text
@@ -3046,6 +3048,95 @@ extension ReceiverViewController {
                 sections.insert(SettingsSection(footer: "探测未运行。点「开始探测」后按车把按键。", []), at: 0)
             }
             return sections
+        }
+    }
+
+    /// One row per gesture, each a pull-down of the actions it can send to CarPlay.
+    ///
+    /// Gestures are named for what the bike does, because the same button behaves differently
+    /// depending on how long it is held (see HandlebarProbe): a short ▲▼ is a volume step, a held one
+    /// is a track key. The row for a gesture the dash never delivers says so instead of looking broken.
+    private func handlebarMappingSection() -> SettingsSection {
+        let rows: [SettingsRow] = HandlebarGesture.allCases.map { gesture in
+            let current = HandlebarMapping.action(for: gesture)
+            let menu = ChoiceMenu(items: HandlebarAction.allCases.map(\.title))
+            menu.selectedSegmentIndex = HandlebarAction.allCases.firstIndex(of: current) ?? 0
+            menu.isEnabled = !gesture.isUnavailable
+            menu.tag = Self.handlebarGestureTag(gesture)
+            menu.addTarget(self, action: #selector(handlebarGestureChanged(_:)), for: .valueChanged)
+            var row = SettingsRow.control(gesture.title, icon: ("hand.tap", .systemIndigo), menu)
+            if gesture.isUnavailable { row.subtitle = { "车机自己消费这个按键，手机收不到" } }
+            return row
+        }
+        return SettingsSection("按键映射", footer: "左边是车把动作，右边是要发给 CarPlay 的操作。▲▼ 短按走音量通道（会自动把音量拨回），长按走上一曲/下一曲通道，双击是固件合并后的大跳变。SET 短按与 BACK 被车机自己占用，无法用于投屏。", rows)
+    }
+
+    /// How long a double and a hold are, and whether a held arrow keeps scrolling.
+    private func handlebarTimingSection() -> SettingsSection {
+        let doubles = Self.handlebarTimingValues
+        let holds = Self.handlebarHoldValues
+        let doubleMenu = ChoiceMenu(items: doubles.map(\.0))
+        doubleMenu.selectedSegmentIndex = doubles.firstIndex { abs($0.1 - HandlebarMapping.doubleTapWindow) < 0.01 } ?? 2
+        doubleMenu.tag = Self.handlebarDoubleTapTag
+        doubleMenu.addTarget(self, action: #selector(handlebarTimingChanged(_:)), for: .valueChanged)
+        let holdMenu = ChoiceMenu(items: holds.map(\.0))
+        holdMenu.selectedSegmentIndex = holds.firstIndex { abs($0.1 - HandlebarMapping.holdDelay) < 0.01 } ?? 1
+        holdMenu.tag = Self.handlebarHoldTag
+        holdMenu.addTarget(self, action: #selector(handlebarTimingChanged(_:)), for: .valueChanged)
+        let repeatSwitch = UISwitch()
+        repeatSwitch.isOn = HandlebarMapping.repeatsWhenHeld
+        repeatSwitch.addAction(UIAction { [weak self] _ in
+            HandlebarMapping.repeatsWhenHeld = repeatSwitch.isOn
+            self?.log("车把长按连发：\(repeatSwitch.isOn ? "开" : "关")")
+        }, for: .valueChanged)
+
+        return SettingsSection("手势与时序", footer: "双击窗口：两次按键隔多久仍算「双击」。长按阈值：SET 按多久算长按（车机不发按下/松开，只能计时，所以长按会有这么多延迟）。长按连发只影响映射为上一项/下一项的长按。", [
+            .control("双击窗口", icon: ("hand.tap.fill", .systemTeal), doubleMenu),
+            .control("长按阈值", icon: ("timer", .systemOrange), holdMenu),
+            .control("长按连发", icon: ("arrow.triangle.2.circlepath", .systemGreen), repeatSwitch),
+            .action("恢复默认映射", icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
+                HandlebarMapping.reset()
+                self?.log("车把映射已恢复默认")
+                self?.reloadVisibleSettings()
+            }
+        ])
+    }
+
+    private static let handlebarDoubleTapTag = 9001
+    private static let handlebarHoldTag = 9002
+    private static let handlebarTimingValues: [(String, TimeInterval)] = [
+        ("0.35 秒", 0.35), ("0.45 秒", 0.45), ("0.55 秒", 0.55), ("0.80 秒", 0.80)
+    ]
+    private static let handlebarHoldValues: [(String, TimeInterval)] = [
+        ("0.40 秒", 0.40), ("0.60 秒", 0.60), ("0.80 秒", 0.80)
+    ]
+    private static func handlebarGestureTag(_ gesture: HandlebarGesture) -> Int {
+        9100 + (HandlebarGesture.allCases.firstIndex(of: gesture) ?? 0)
+    }
+    private static func handlebarGesture(from tag: Int) -> HandlebarGesture? {
+        let index = tag - 9100
+        return HandlebarGesture.allCases.indices.contains(index) ? HandlebarGesture.allCases[index] : nil
+    }
+
+    @objc private func handlebarGestureChanged(_ sender: ChoiceMenu) {
+        guard let gesture = Self.handlebarGesture(from: sender.tag) else { return }
+        let index = sender.selectedSegmentIndex
+        guard HandlebarAction.allCases.indices.contains(index) else { return }
+        let action = HandlebarAction.allCases[index]
+        HandlebarMapping.set(action, for: gesture)
+        log("车把映射：\(gesture.title) → \(action.title)")
+    }
+
+    @objc private func handlebarTimingChanged(_ sender: ChoiceMenu) {
+        let index = sender.selectedSegmentIndex
+        if sender.tag == Self.handlebarDoubleTapTag {
+            guard Self.handlebarTimingValues.indices.contains(index) else { return }
+            HandlebarMapping.doubleTapWindow = Self.handlebarTimingValues[index].1
+            log("双击窗口：\(Self.handlebarTimingValues[index].0)")
+        } else {
+            guard Self.handlebarHoldValues.indices.contains(index) else { return }
+            HandlebarMapping.holdDelay = Self.handlebarHoldValues[index].1
+            log("长按阈值：\(Self.handlebarHoldValues[index].0)")
         }
     }
 

@@ -41,14 +41,18 @@ final class HandlebarProbe: @unchecked Sendable {
     /// What the bike actually sends, measured on a 150SCF (see the class comment):
     /// ▲▼ = absolute-volume steps, enter = togglePlayPause (and sometimes a bare next/previous),
     /// no seek events at all, so there is no server-side hold.
-    private let doubleTapWindow: TimeInterval = 0.55
-    private let selectHoldDelay: TimeInterval = 0.60
+
     /// Last ▲ and ▼ press, per direction: a second press on the same arrow inside the window is a
     /// double (the firmware merges a very fast one into a single bigger step, handled below).
     private var lastArrow: [Int: Date] = [:]
     /// Volume before we dial it back, so a ▲▼ press does not accumulate to full scale.
     private var restoringVolume = false
     private var savedVolume: Float?
+    /// Held-arrow repeat: while the dash keeps sending track keys, keep scrolling.
+    private var repeatTimer: Timer?
+    private var heldRepeatCount = 0
+    private let heldRepeatInterval: TimeInterval = 0.12
+    private let heldRepeatLimit = 40
     private var selectDown: Date?
     private var selectHoldTimer: Timer?
     private var selectFired: [(tap: Date, action: CarPlayControl)] = []
@@ -106,6 +110,8 @@ final class HandlebarProbe: @unchecked Sendable {
         commandTargets.removeAll()
         volumeObservation?.invalidate()
         volumeObservation = nil
+        repeatTimer?.invalidate(); repeatTimer = nil
+        selectHoldTimer?.invalidate(); selectHoldTimer = nil
         silent?.stop()
         silent = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
@@ -215,29 +221,26 @@ final class HandlebarProbe: @unchecked Sendable {
     //   BACK       consumed by the dash — the phone never sees it.
     // So confirm and back cannot come from their own buttons and are built from doubles.
 
-    /// ▲/▼ short press: one notch of the wheel, or (second press on the same arrow) Back / Select.
+    /// ▲/▼ short press. A second press on the same arrow inside the window is a double; a jump the
+    /// firmware merged is a double by itself.
     private func handleVolume(direction: Int, steps: Float) {
         restoreVolume(direction: direction, steps: steps)
         guard onControl != nil else { return }
         let now = Date()
 
-        // A fast double is merged by the firmware into one bigger jump; that is a double by itself.
         if steps >= Float(0.075) {
             lastArrow.removeAll()
-            onControl?(direction > 0 ? .back : .select)
+            fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
             return
         }
 
-        if let last = lastArrow[direction], now.timeIntervalSince(last) < doubleTapWindow {
+        if let last = lastArrow[direction], now.timeIntervalSince(last) < HandlebarMapping.doubleTapWindow {
             lastArrow.removeAll()
-            // ▲▲ = Back, ▼▼ = Select: the two actions the dash does not hand us.
-            onControl?(direction > 0 ? .back : .select)
+            fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
             return
         }
         lastArrow[direction] = now
-        // Singles fire at once: the manual's "short press = previous/next" is a one-press action and
-        // waiting out the double window would be felt on every step.
-        onControl?(direction > 0 ? .knobPrevious : .knobNext)
+        fire(direction > 0 ? .arrowUpShort : .arrowDownShort)
     }
 
     /// Puts the system volume back where the press found it, so ▲▼ stay usable at full scale.
@@ -268,39 +271,64 @@ final class HandlebarProbe: @unchecked Sendable {
     private func handleSelect() {
         guard onControl != nil else { return }
         let now = Date()
-        if let last = selectFired.last, now.timeIntervalSince(last.tap) < doubleTapWindow {
+        if let last = selectFired.last, now.timeIntervalSince(last.tap) < HandlebarMapping.doubleTapWindow {
             selectHoldTimer?.invalidate(); selectHoldTimer = nil
             selectDown = nil
             selectFired.removeAll()
-            onControl?(.back)
+            fire(.setDouble)
             return
         }
         selectDown = now
         selectHoldTimer?.invalidate()
-        selectHoldTimer = Timer.scheduledTimer(withTimeInterval: selectHoldDelay, repeats: false) { [weak self] _ in
+        selectHoldTimer = Timer.scheduledTimer(withTimeInterval: HandlebarMapping.holdDelay, repeats: false) {
+            [weak self] _ in
             guard let self, self.selectDown != nil else { return }
             self.selectDown = nil
             self.selectFired.removeAll()
-            self.onControl?(.home)
+            self.fire(.setLong)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self, self.selectDown != nil else { return }
             self.selectDown = nil
             self.selectHoldTimer?.invalidate(); self.selectHoldTimer = nil
             self.selectFired.append((Date(), .select))
-            self.onControl?(.select)
+            self.fire(.setShort)
         }
     }
 
-    /// ▲/▼ long press: a clean track key with no volume side effect.
+    /// ▲/▼ long press: a clean track key with no volume side effect. A held arrow keeps sending them,
+    /// so they can either keep scrolling (repeat) or act once.
     private func handleTrack(forward: Bool) {
         guard onControl != nil else { return }
-        leftArrowCleared(forward ? 1 : -1)
-        onControl?(forward ? .knobNext : .knobPrevious)
+        lastArrow[forward ? 1 : -1] = nil
+        let gesture: HandlebarGesture = forward ? .arrowDownLong : .arrowUpLong
+        let action = HandlebarMapping.action(for: gesture)
+        if action == .none { return }
+        fire(gesture)
+        guard HandlebarMapping.repeatsWhenHeld, action == .knobNext || action == .knobPrevious else { return }
+        startHeldRepeat(action)
     }
 
-    private func leftArrowCleared(_ direction: Int) {
-        lastArrow[direction] = nil
+    /// Keeps scrolling while the dash keeps sending track keys. Each new event restarts the timer, so
+    /// letting go stops it within one interval.
+    private func startHeldRepeat(_ action: HandlebarAction) {
+        repeatTimer?.invalidate()
+        repeatTimer = Timer.scheduledTimer(withTimeInterval: heldRepeatInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.onControl?(action.control ?? .select)
+            self.heldRepeatCount += 1
+            if self.heldRepeatCount >= self.heldRepeatLimit {
+                self.repeatTimer?.invalidate(); self.repeatTimer = nil
+            }
+        }
+    }
+
+    /// Runs the configured action for a gesture.
+    private func fire(_ gesture: HandlebarGesture) {
+        let action = HandlebarMapping.action(for: gesture)
+        guard action != .none, let control = action.control else { return }
+        record("→ \(gesture.title) = \(action.title)", "")
+        onControl?(control)
     }
 
     // MARK: - Now Playing claim (what makes the keys arrive at all)
