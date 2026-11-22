@@ -26,6 +26,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Latest decoded picture. CarPlay drops to 1-2 fps on a static screen while the dash pulls at
     /// ~20 fps, so idle pulls are answered by re-encoding this picture instead of returning nothing.
     private var latestImage: CVPixelBuffer?
+    /// The last picture already letterboxed to the canvas. Scaling runs on the CPU (CIContext with
+    /// the software renderer), which cost ~100 ms per pull when idle repeats re-scaled the same
+    /// picture; do it once per new picture instead.
+    private var fittedBuffer: CVPixelBuffer?
     /// VideoToolbox encodes are serialized: the work queue and the pull path both encode.
     private let encodeLock = NSLock()
     private var encoder: H264Encoder?
@@ -107,6 +111,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
              "bitrate=\(parameters.bitrate) fps=\(parameters.frameRate)")
         if sizeChanged {
             // A keyframe of the previous canvas must never answer a pull for this one.
+            lock.lock(); fittedBuffer = nil; lock.unlock()
             queue.invalidateKeyframe()
             queue.resynchronize()
         }
@@ -131,10 +136,14 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // 1-2 fps on a static screen. Answer from the last picture instead of returning nothing,
         // which the link treats as a miss and eventually tears the session down for.
         lock.lock()
+        let cached = fittedBuffer
         let idle = latestImage
         let canvas = self.canvas
         lock.unlock()
-        if let idle, let canvas, let frame = encode(idle, canvas: canvas) {
+        let prepared = cached ?? (idle.flatMap { image in
+            canvas.flatMap { try? fitted(image, width: $0.width, height: $0.height) }
+        })
+        if let prepared, let canvas, let frame = encode(prepared, canvas: canvas) {
             lock.lock(); servedCount += 1; repeatedCount += 1; lock.unlock()
             return EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
                                 presentationTime: ProcessInfo.processInfo.systemUptime,
@@ -205,7 +214,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             return
         }
         lock.lock(); decodedCount += 1; lock.unlock()
-        guard let frame = encode(image, canvas: canvas) else {
+        guard let prepared = try? fitted(image, width: canvas.width, height: canvas.height) else {
+            diagnose("letterbox failed")
+            return
+        }
+        lock.lock(); fittedBuffer = prepared; lock.unlock()
+        guard let frame = encode(prepared, canvas: canvas) else {
             diagnose("encode returned nil")
             return
         }
