@@ -26,6 +26,8 @@ final class CfMotoOutput {
     private var pump: Task<Void, Never>?
     private var ticker: Task<Void, Never>?
     private var lastState = "未启动"
+    /// Last few diagnostic lines, so the copy button also carries the *reason* a stage failed.
+    private var recent: [String] = []
     /// RSA identity for CLIENT_INFO. Kept for the process lifetime: a fresh key per launch is fine
     /// for a test build, but it means the dash sees a new accessory on every start.
     private var signer: PureSwiftHuidSigner?
@@ -35,7 +37,14 @@ final class CfMotoOutput {
 
         // A fresh frame source per session (see the property comment).
         source = CfMotoVideoSource()
-        source.log = { [weak self] in self?.onLog?($0) }
+        source.log = { [weak self] line in
+            guard let self else { return }
+            self.lock.lock()
+            self.recent.append(line)
+            if self.recent.count > 12 { self.recent.removeFirst(self.recent.count - 12) }
+            self.lock.unlock()
+            self.onLog?(line)
+        }
         source.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?() }
         lastState = "未启动"
 
@@ -121,8 +130,10 @@ final class CfMotoOutput {
     var diagnostics: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-        let linkState = lock.withLock { link != nil } ? "link=up" : "link=down"
-        return "CarWithin \(version) (\(build)) · CFMOTO \(lastState) · \(source.counters) · \(linkState)"
+        let (isUp, tail) = lock.withLock { (link != nil, recent.suffix(8).joined(separator: " || ")) }
+        let head = "CarWithin \(version) (\(build)) · CFMOTO \(lastState) · \(source.counters) · " +
+            (isUp ? "link=up" : "link=down")
+        return tail.isEmpty ? head : head + "\n--- 最近日志 ---\n" + tail
     }
 
     func stop() {

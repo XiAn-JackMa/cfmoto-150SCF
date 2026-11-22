@@ -46,6 +46,13 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var servedCount = 0    // frames actually handed to the link
     private var nonH264 = 0        // access units dropped because CarPlay sent H.265
     private var paramSets = 0      // SPS/PPS absorbed from the stream
+    // Why decode() returned nothing, counted per reason: this is what pinpoints a stuck gate.
+    private var dropWaitingIDR = 0
+    private var dropCooldown = 0
+    private var dropNoDecoder = 0
+    private var dropNoPicture = 0
+    private var dropNoCallback = 0
+    private var decodeErrors = 0
     /// `parameters` is mutated on the work queue; this flag is the lock-protected view of it.
     private var parametersReady = false
     /// Throttles per-frame diagnostics so a stalled pipeline says why once, not 30 times a second.
@@ -62,7 +69,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     var counters: String {
         lock.lock(); defer { lock.unlock() }
         let format = nonH264 > 0 ? "H.265×\(nonH264)" : (parametersReady ? "H.264 就绪" : "H.264 等 SPS")
-        return "CarPlay \(inbound) · \(format) · SPS×\(paramSets) · 解码 \(decodedCount) · 编码 \(encodedCount) · 拉帧 \(pulls) · 送出 \(servedCount)"
+        let drops = "丢弃[等IDR \(dropWaitingIDR)/冷却 \(dropCooldown)/无解码器 \(dropNoDecoder)/无画面 \(dropNoPicture)/无回调 \(dropNoCallback)/异常 \(decodeErrors)]"
+        return "CarPlay \(inbound) · \(format) · SPS×\(paramSets) · 解码 \(decodedCount) · 编码 \(encodedCount) · 拉帧 \(pulls) · 送出 \(servedCount) · \(drops)"
     }
 
     init(queueCapacity: Int = 3) {
@@ -175,41 +183,61 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     private func decode(_ data: Data, keyframe: Bool) -> CVPixelBuffer? {
         var picture: [Data] = []
-        var decoded: CVPixelBuffer?
-        var failure: Error?
+        // The decoder's callbacks land on its own thread, so hand the result back through a box
+        // instead of locals captured by escaping closures: reading a local right after
+        // waitForFrames() can see nil while the picture arrives a moment later, which dropped
+        // every frame after the first.
+        let box = DecodeBox()
 
         do {
             for unit in try AnnexB.units(in: data) {
                 if VideoCodec.h264.parameterSet(unit) != nil {
-                    if parameters.absorb(unit) { lock.lock(); waitingForIDR = true; paramSets += 1; parametersReady = parameters.isComplete; lock.unlock() }
+                    if parameters.absorb(unit) {
+                        lock.lock(); waitingForIDR = true; paramSets += 1
+                        parametersReady = parameters.isComplete; lock.unlock()
+                    }
                 } else {
                     picture.append(unit)
                 }
             }
             let needsRebuild = lock.withLock { waitingForIDR }
             if needsRebuild {
-                guard parameters.isComplete, keyframe, !picture.isEmpty else { return nil }
+                guard parameters.isComplete, keyframe, !picture.isEmpty else {
+                    lock.lock(); dropWaitingIDR += 1; lock.unlock()
+                    return nil
+                }
                 guard ProcessInfo.processInfo.systemUptime - lastCodecFailure >= 0.5 else {
+                    lock.lock(); dropCooldown += 1; lock.unlock()
                     onKeyframeRequest?()
                     return nil
                 }
                 // Build outside the lock: a throwing initialiser must not leave it held.
                 let rebuilt = try TailingH264Decoder(configuration: parameters.decoderConfigurationRecord(),
-                    output: { image in decoded = image },
-                    failure: { failure = $0 })
+                    output: { box.set(image: $0) },
+                    failure: { box.set(error: $0) })
                 lock.lock()
                 decoder?.invalidate()
                 decoder = rebuilt
                 waitingForIDR = false
                 lock.unlock()
             }
-            guard let decoder, !picture.isEmpty else { return nil }
+            guard let decoder else {
+                lock.lock(); dropNoDecoder += 1; lock.unlock()
+                return nil
+            }
+            guard !picture.isEmpty else {
+                lock.lock(); dropNoPicture += 1; lock.unlock()
+                return nil
+            }
             try decoder.decode(AnnexB.lengthPrefixed(picture),
                                presentationTimeMicroseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000_000),
                                isKeyframe: keyframe)
             decoder.waitForFrames()
-            if let failure { throw failure }
-            return decoded
+            if let image = box.take() { return image }
+            if let failure = box.error { throw failure }
+            lock.lock(); dropNoCallback += 1; lock.unlock()
+            diagnose("decoder produced no picture (keyframe=\(keyframe) units=\(picture.count))")
+            return nil
         } catch {
             lock.lock()
             decoder?.invalidate()
@@ -217,6 +245,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             waitingForIDR = true
             lock.unlock()
             lastCodecFailure = ProcessInfo.processInfo.systemUptime
+            lock.lock(); decodeErrors += 1; lock.unlock()
             diagnose("decode failed: \(error.localizedDescription)")
             onKeyframeRequest?()
             return nil
@@ -308,5 +337,34 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         context.render(placed, to: buffer, bounds: CGRect(x: 0, y: 0, width: width, height: height),
                        colorSpace: CGColorSpaceCreateDeviceRGB())
         return buffer
+    }
+}
+/// Carries one decoder output from VideoToolbox's callback thread back to the caller.
+///
+/// Reading a captured local right after `waitForFrames()` is not enough: the callback can land a
+/// moment later, which silently dropped almost every frame. `take` waits briefly for it.
+private final class DecodeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var image: CVPixelBuffer?
+    private var failure: Error?
+
+    func set(image: CVPixelBuffer) {
+        lock.lock(); if self.image == nil { self.image = image }; lock.unlock()
+    }
+
+    func set(error: Error) {
+        lock.lock(); if failure == nil { failure = error }; lock.unlock()
+    }
+
+    var error: Error? { lock.lock(); defer { lock.unlock() }; return failure }
+
+    func take(timeout: TimeInterval = 0.05) -> CVPixelBuffer? {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while true {
+            lock.lock(); let value = image; lock.unlock()
+            if let value { return value }
+            if ProcessInfo.processInfo.systemUptime >= deadline { return nil }
+            Thread.sleep(forTimeInterval: 0.002)
+        }
     }
 }
