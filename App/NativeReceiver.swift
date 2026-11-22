@@ -141,7 +141,7 @@ final class NativeReceiver {
                 self.cfmoto.onKeyframeRequest = { [weak self] in
                     self?.requestKeyFrame(reason: "CFMOTO 解码恢复")
                 }
-                self.cfmoto.testPattern = configuration.cfmotoTestPattern
+                self.cfmoto.setTestPattern(configuration.cfmotoTestPattern)
                 self.cfmoto.start(localAddress: ReceiverConfiguration.wifiIPv4Address() ?? configuration.address,
                                   targetAddress: target, port: configuration.cfmotoPort)
                 // Read the log from a PC instead of copying it off the phone by hand.
