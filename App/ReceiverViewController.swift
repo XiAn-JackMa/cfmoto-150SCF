@@ -14,6 +14,21 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let sameDevice = SameDeviceProbe()
     private let transportProbe = DirectAccessoryTransport()
     private let controlBrowser = CarPlayControlBrowser()
+    /// Handlebar (Bluetooth AVRCP) probe: observe only, no mapping until the bike's output is known.
+    private let handlebarProbe = HandlebarProbe()
+    private let handlebarLogView: UITextView = {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = true
+        view.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        view.backgroundColor = .secondarySystemBackground
+        view.layer.cornerRadius = 8
+        view.textContainerInset = UIEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
+        view.heightAnchor.constraint(equalToConstant: 260).isActive = true
+        return view
+    }()
+    private var handlebarLines: [String] = []
     private let receiverBrowser = TDSCarKitReceiverBrowser()
     private let receiverPicker = UIButton(type: .system)
     private var remoteTarget: TDSCarKitReceiverBrowser.Target?
@@ -699,6 +714,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self.statusLabel.text = "蓝牙广播已开启，正在等待 iPhone"
         }
         controlBrowser.onLog = { [weak self] in self?.log($0) }
+        // Handlebar probe: show every raw event, and keep it in the log so it survives a crash.
+        handlebarProbe.onLog = { [weak self] line in
+            guard let self else { return }
+            DispatchQueue.main.async { self.appendHandlebarLine(line) }
+            self.log(line)
+        }
         receiverBrowser.onLog = { [weak self] in self?.log($0) }
         receiverBrowser.onTargets = { [weak self] targets in
             guard let self, !self.running, self.modeControl.selectedSegmentIndex == 2 else { return }
@@ -824,7 +845,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private func planDisplay(for screen: CarScreen?) -> DisplayPlan {
         if outputMode == .cfmoto {
             // Render CarPlay at the canvas the dash itself asked for. A 16:9 render letterboxed into
-            // the 150SC's 1024x512 (2:1) leaves 57 px of black on each side and costs a rescale that
+            // the 150SCF's 1024x512 (2:1) leaves 57 px of black on each side and costs a rescale that
             // softens dash text; matching the canvas removes both. The value is remembered from the
             // last session, so the second run is exact even though the first has to guess.
             let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
@@ -2773,7 +2794,7 @@ extension ReceiverViewController {
         return [
             SettingsSection("春风 EasyConn（MotoPlay）",
                 footer: "iPhone 先加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面后再启动 CarPlay。" +
-                        "地址留空表示使用本机当前 Wi-Fi 网关。CarPlay 会按车机要求的画布 1:1 渲染（150SC 为 1024×512），" +
+                        "地址留空表示使用本机当前 Wi-Fi 网关。CarPlay 会按车机要求的画布 1:1 渲染（150SCF 为 1024×512），" +
                         "所以上面「画面 › 尺寸/分辨率/宽高比」在本模式下不生效，也不会有黑边。" +
                         "声音走 iPhone 或蓝牙，触控暂不支持。", [
                     .field("车机 IP 地址", cfmotoAddressField, placeholder: "192.168.0.1"),
@@ -2954,7 +2975,10 @@ extension ReceiverViewController {
         var sections = [SettingsSection("实验性功能", footer: "检查这台 iPhone 是否允许 App 发布本机 iAP2 配件端点（本机 CarPlay 的前提）。CarPlay 运行中不能测试。", [
             .action("测试本机传输能力", icon: ("checkmark.shield.fill", .systemPink), detail: { [unowned self] in self.statusLabel.text }) { [unowned self] in
                 self.testSameDeviceTransport()
-            }
+            },
+            .page("车把按键探测", icon: ("dot.radiowaves.left.and.right", .systemIndigo), detail: { [unowned self] in
+                self.handlebarProbe.count == 0 ? "未收到" : "\(self.handlebarProbe.count) 条"
+            }) { [unowned self] in self.handlebarProbePage() }
         ])]
         if UIDevice.current.userInterfaceIdiom == .pad {
             sections.append(SettingsSection("iPad 模式", footer: "接收其他 iPhone 的 CarPlay，或把这台设备的 CarPlay 投送到另一台 iPad。", [.view(modeControl)]))
@@ -2966,6 +2990,68 @@ extension ReceiverViewController {
         }
         return sections
     }
+
+    // MARK: 车把按键探测
+
+    /// Observe-only page: it reports what the bike's Bluetooth module actually sends.
+    ///
+    /// The 150SCF's dash is non-touch, so its ▲▼ arrive as absolute-volume steps and its enter key as
+    /// AVRCP play/pause. What the firmware emits is undocumented, so this records the raw events and
+    /// the mapping is decided afterwards instead of guessed.
+    fileprivate func handlebarProbePage() -> SettingsPageController {
+        page("车把按键探测") { [unowned self] in
+            let running = self.handlebarProbe.isRunning
+            let claim = self.handlebarProbe.isNowPlaying
+            var sections: [SettingsSection] = [
+                SettingsSection(footer: "只观察、不映射。车把按键是蓝牙 AVRCP，不走 Wi-Fi 投屏链路。iPhone 只把传输键交给「正在播放」的 App，所以要先点下面的「接管正在播放」——这会让手机音乐暂停。", [
+                    .action(running ? "停止探测" : "开始探测",
+                            icon: (running ? "stop.circle.fill" : "play.circle.fill", running ? .systemRed : .systemGreen)) {
+                        if running { self.handlebarProbe.stop() } else { self.handlebarProbe.start() }
+                        self.reloadVisibleSettings()
+                    },
+                    .action(claim ? "已接管正在播放（点此释放）" : "接管正在播放（收得到按键的前提）",
+                            icon: ("music.note.list", .systemPurple)) {
+                        if claim {
+                            self.handlebarProbe.stop()
+                            self.handlebarProbe.start()
+                        } else if !self.handlebarProbe.becomeNowPlaying() {
+                            self.alert("接管失败", "无法取得音频会话。请确认没有别的 App 正在播放音乐，或已插入耳机。")
+                        }
+                        self.reloadVisibleSettings()
+                    }
+                ]),
+                SettingsSection(footer: "记录下来发给开发者即可决定映射。", [
+                    .view(self.handlebarLogView),
+                    .action("复制记录", icon: ("doc.on.doc", .systemBlue)) {
+                        UIPasteboard.general.string = self.handlebarLogView.text
+                    },
+                    .action("清空", icon: ("trash", .systemGray), destructive: true) {
+                        self.handlebarLines.removeAll()
+                        self.handlebarLogView.text = ""
+                        self.reloadVisibleSettings()
+                    }
+                ])
+            ]
+            if !running {
+                sections.insert(SettingsSection(footer: "探测未运行。点「开始探测」后按车把按键。", []), at: 0)
+            }
+            return sections
+        }
+    }
+
+    private func appendHandlebarLine(_ line: String) {
+        guard Thread.isMainThread else { DispatchQueue.main.async { [weak self] in self?.appendHandlebarLine(line) }; return }
+        let stamp = Self.handlebarStamp.string(from: Date())
+        handlebarLines.append("\(stamp) \(line)")
+        if handlebarLines.count > 200 { handlebarLines.removeFirst(handlebarLines.count - 200) }
+        handlebarLogView.text = handlebarLines.joined(separator: "\n")
+        handlebarLogView.scrollRangeToVisible(NSRange(location: (handlebarLogView.text as NSString).length, length: 0))
+    }
+    private static let handlebarStamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
 
     private func diagnosticsSection() -> SettingsSection {
         var system = utsname(); uname(&system)

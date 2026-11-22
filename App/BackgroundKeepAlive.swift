@@ -107,7 +107,7 @@ final class BackgroundKeepAlive {
                                         options: session.categoryOptions.union(.mixWithOthers))
             }
             try session.setActive(true)
-            let player = try player ?? AVAudioPlayer(data: Self.silentWAV)
+            let player = try player ?? AVAudioPlayer(data: Self.silentLoopData)
             player.numberOfLoops = -1
             player.volume = 0
             self.player = player
@@ -125,8 +125,9 @@ final class BackgroundKeepAlive {
         }
     }
 
-    /// One second of 8 kHz mono 16-bit silence.
-    private static let silentWAV: Data = {
+    /// One second of 8 kHz mono 16-bit silence. Shared with the handlebar probe so the two never
+    /// disagree about what a valid silent loop is.
+    static let silentLoopData: Data = {
         let rate: UInt32 = 8_000, samples = rate
         let dataBytes = samples * 2
         var wav = Data()

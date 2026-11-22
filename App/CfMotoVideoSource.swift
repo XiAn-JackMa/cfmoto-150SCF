@@ -2,7 +2,7 @@
 //
 // Feeds the EasyConn link from CarPlay's own H.264.
 //
-// The dashboard demands a fixed canvas (a CFMOTO 150SC asks for 1024x515, rounded to 1024x512) while
+// The dashboard demands a fixed canvas (a CFMOTO 150SCF asks for 1024x515, rounded to 1024x512) while
 // CarPlay delivers whatever picture size it negotiated. So every access unit is decoded, letterboxed
 // into the canvas and re-encoded — the same shape as ZeehoOutput, except frames are served on demand
 // (the dash pulls with REQ_RV_DATA_NEXT) instead of on a fixed timer.

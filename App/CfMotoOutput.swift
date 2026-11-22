@@ -3,10 +3,10 @@
 // EasyConn ("MotoPlay") output: CarPlay → a CFMOTO / Carbit motorcycle dashboard.
 //
 // The protocol engine is OpenCfMotoCore (vendored under Sources/OpenCfMotoCore), which is the same
-// code that is known to work on a CFMOTO 150SC: PXC handshake on 10922, media control on 10921,
+// code that is known to work on a CFMOTO 150SCF: PXC handshake on 10922, media control on 10921,
 // pulled H.264 on 10920, RSA HUID in the CLIENT_INFO reply. Everything here is wiring.
 //
-// Profile: CFDL16 / "legacy" is the 150SC (BikeProfileID.legacy). The cap with the canvas comes from
+// Profile: CFDL16 / "legacy" is the 150SCF (BikeProfileID.legacy). The cap with the canvas comes from
 // the dash itself in REQ_RV_DATA_START (16), so no size is hard-coded.
 
 import Foundation
