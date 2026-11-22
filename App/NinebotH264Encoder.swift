@@ -152,7 +152,9 @@ final class H264Encoder {
         // 先要硬件编码器，再退到软件：iOS 在 App 进入后台后会作废硬件编码器，锁屏骑行时必须有人接上。
         var (status, created) = create(nil)
         if status != noErr || created == nil {
-            let software = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: false] as CFDictionary
+            // The kVTVideoEncoderSpecification_* constant for this key is iOS 17.4+, and this app
+            // targets 16.0, so name the key the way the constant does.
+            let software = ["EnableHardwareAcceleratedVideoEncoder": false] as CFDictionary
             (status, created) = create(software)
             usingSoftware = true
         }
