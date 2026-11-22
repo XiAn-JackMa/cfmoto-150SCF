@@ -150,6 +150,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoCardStatus = UILabel()
     private let cfmotoAddressField = UITextField()
     private let cfmotoPortField = UITextField()
+    private let cfmotoTestSwitch = UISwitch()
     private let cfmotoStatus = StatusLabel()
     /// Every EasyConn line in one scrollable, selectable field: a one-line label cannot be read or
     /// copied while the link is reconnecting.
@@ -1116,6 +1117,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         config.cfmotoAddress = cfmotoAddress.isEmpty ? nil : cfmotoAddress
         let cfmotoPort = (cfmotoPortField.text ?? "").trimmingCharacters(in: .whitespaces)
         config.cfmotoPort = cfmotoPort.isEmpty ? "10930" : cfmotoPort
+        config.cfmotoTestPattern = cfmotoTestSwitch.isOn
     }
     @objc private func toggleSettings() { revealSettings() }
     @objc private func driveChanged() {
@@ -1704,6 +1706,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         tailingAddressField.isEnabled = value
         cfmotoAddressField.isEnabled = value
         cfmotoPortField.isEnabled = value
+        cfmotoTestSwitch.isEnabled = value
         carLifeAddressField.isEnabled = value
     }
     @objc private func willResignActive() {
@@ -1948,6 +1951,8 @@ extension ReceiverViewController {
         cfmotoAddressField.keyboardType = .decimalPad
         cfmotoAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
         cfmotoPortField.text = defaults.string(forKey: "cfmotoPort") ?? "10930"
+        cfmotoTestSwitch.isOn = defaults.bool(forKey: "cfmotoTestPattern")
+        cfmotoTestSwitch.addTarget(self, action: #selector(saveHeadUnitOutput), for: .valueChanged)
         cfmotoPortField.keyboardType = .numberPad
         cfmotoPortField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
         if let crash = CrashCatcher.previousException() {
@@ -2000,6 +2005,7 @@ extension ReceiverViewController {
         UserDefaults.standard.set(tailingAddressField.text ?? "", forKey: "tailingAddress")
         UserDefaults.standard.set(cfmotoAddressField.text ?? "", forKey: "cfmotoAddress")
         UserDefaults.standard.set(cfmotoPortField.text ?? "", forKey: "cfmotoPort")
+        UserDefaults.standard.set(cfmotoTestSwitch.isOn, forKey: "cfmotoTestPattern")
         refreshVideoOutputSummary()
     }
     @objc private func headUnitOutputChanged() {
@@ -2687,9 +2693,10 @@ extension ReceiverViewController {
                         "地址留空表示使用本机当前 Wi-Fi 网关。画面固定为车机要求的画布（150SC 为 1024×512），" +
                         "声音走 iPhone 或蓝牙，触控暂不支持。", [
                     .field("车机 IP 地址", cfmotoAddressField, placeholder: "192.168.0.1"),
-                    .field("EasyConn 端口", cfmotoPortField, placeholder: "10930")
+                    .field("EasyConn 端口", cfmotoPortField, placeholder: "10930"),
+                    .control("测试图案（不接 CarPlay）", cfmotoTestSwitch)
                 ]),
-            SettingsSection("连接状态", footer: "上面是全部 EasyConn 日志，可滚动、可长按全选。回传给开发者时点「复制日志」。", [
+            SettingsSection("连接状态", footer: "上面是全部 EasyConn 日志，可滚动、可长按全选。也可以在同网段的电脑上取：curl http://<手机IP>:10950/ （长度前缀 + UTF-8）。", [
                 .view(cfmotoLogView),
                 .action("复制日志", icon: ("doc.on.doc", .systemBlue)) { [weak self] in
                     UIPasteboard.general.string = self?.cfmotoLogView.text

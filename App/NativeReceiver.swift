@@ -55,6 +55,7 @@ final class NativeReceiver {
     var onTailingState: ((String) -> Void)?
     /// EasyConn output to a CFMOTO / Carbit dashboard.
     private let cfmoto = CfMotoOutput()
+    private let cfmotoLogServer = CfMotoLogServer()
     var onCfMotoState: ((String) -> Void)?
     /// Snapshot for the settings screen's copy button.
     var cfmotoDiagnostics: String { cfmoto.diagnostics }
@@ -133,8 +134,14 @@ final class NativeReceiver {
                 self.cfmoto.onKeyframeRequest = { [weak self] in
                     self?.requestKeyFrame(reason: "CFMOTO 解码恢复")
                 }
+                self.cfmoto.testPattern = configuration.cfmotoTestPattern
                 self.cfmoto.start(localAddress: ReceiverConfiguration.wifiIPv4Address() ?? configuration.address,
                                   targetAddress: target, port: configuration.cfmotoPort)
+                // Read the log from a PC instead of copying it off the phone by hand.
+                self.cfmotoLogServer.start { [weak self] in
+                    guard let self else { return "" }
+                    return self.cfmotoDiagnostics + "\n\n" + self.cfmoto.logDump
+                }
             }
             if configuration.carLifeEnabled {
                 self.carLife.onLog = { [weak self] in self?.log($0) }
@@ -342,6 +349,7 @@ final class NativeReceiver {
         ninebot.stop()
         tailing.stop()
         cfmoto.stop()
+        cfmotoLogServer.stop()
         carLink.stop()
         #if DEBUG
         diagnosticStarted = ProcessInfo.processInfo.systemUptime

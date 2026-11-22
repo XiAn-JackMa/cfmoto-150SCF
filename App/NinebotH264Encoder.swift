@@ -103,9 +103,24 @@ final class H264Encoder {
     private var session: VTCompressionSession?
     private let callbackBox = H264CallbackBox()
     private let fps: Int
+    private let profileLevel: ProfileLevel
+    /// True when the session fell back to the software encoder (App in the background).
+    private(set) var usingSoftware = false
 
-    init(width: Int, height: Int, fps: Int, bitrate: Int, output: @escaping (Result<H264EncodedFrame, Error>) -> Void) throws {
+    /// Which H.264 level to declare.
+    ///
+    /// `auto` lets VideoToolbox pick, which yields Baseline 3.0 for these canvas sizes. The Android
+    /// reference client (and the official app) emit **Baseline 3.1**, and fakedash flags the
+    /// difference; some dash decoders validate the level, so callers that feed a dash can pin 3.1.
+    enum ProfileLevel {
+        case auto
+        case baseline31
+    }
+
+    init(width: Int, height: Int, fps: Int, bitrate: Int, profileLevel: ProfileLevel = .auto,
+         output: @escaping (Result<H264EncodedFrame, Error>) -> Void) throws {
         self.fps = fps
+        self.profileLevel = profileLevel
         callbackBox.handler = output
 
         let attributes: [CFString: Any] = [
@@ -133,7 +148,14 @@ final class H264Encoder {
         }
         // 不使用 kVTVideoEncoderSpecification_EnableLowLatencyRateControl：实测它把 SPS 改成
         // max_num_ref_frames=5 并带 VUI，与官方 iOS 码流（refs=1、无 VUI）不同，且手机端编码耗时没有下降
-        let (status, created) = create(nil)
+        //
+        // 先要硬件编码器，再退到软件：iOS 在 App 进入后台后会作废硬件编码器，锁屏骑行时必须有人接上。
+        var (status, created) = create(nil)
+        if status != noErr || created == nil {
+            let software = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: false] as CFDictionary
+            (status, created) = create(software)
+            usingSoftware = true
+        }
         guard status == noErr, let created else { throw H264EncoderError.create(status) }
         session = created
         do {
@@ -149,7 +171,9 @@ final class H264Encoder {
         do {
             try set(kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
             try set(kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-            try set(kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
+                        try set(kVTCompressionPropertyKey_ProfileLevel,
+                    value: profileLevel == .baseline31 ? kVTProfileLevel_H264_Baseline_3_1
+                                                      : kVTProfileLevel_H264_Baseline_AutoLevel)
             try set(kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
             try set(kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
             // 关键帧节奏由 MirrorSession 每 0.5 秒强制请求（与官方 iOS 抓包、Android 版一致）；

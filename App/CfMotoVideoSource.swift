@@ -30,6 +30,13 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// the software renderer), which cost ~100 ms per pull when idle repeats re-scaled the same
     /// picture; do it once per new picture instead.
     private var fittedBuffer: CVPixelBuffer?
+    /// Last keyframe access unit, resent when a pull finds nothing new: no encoding, and a dash
+    /// that lost its reference frames can always resume on it.
+    private var lastKeyframeAU: Data?
+    /// Synthetic colour-bar source: validates the whole EasyConn path (canvas, encoder, framing,
+    /// pulls, repeats) without waiting for CarPlay, on the bench or on the bike.
+    var testPattern = false
+    private var patternTask: Task<Void, Never>?
     /// VideoToolbox encodes are serialized: the work queue and the pull path both encode.
     private let encodeLock = NSLock()
     private var encoder: H264Encoder?
@@ -109,6 +116,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
         log?("CFMOTO canvas \(canvas.width)x\(canvas.height) (dash asked \(canvas.requestedWidth)x\(canvas.requestedHeight)) " +
              "bitrate=\(parameters.bitrate) fps=\(parameters.frameRate)")
+        startPatternIfNeeded()
         if sizeChanged {
             // A keyframe of the previous canvas must never answer a pull for this one.
             lock.lock(); fittedBuffer = nil; lock.unlock()
@@ -127,31 +135,33 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
         lock.lock(); pulls += 1; lock.unlock()
 
-        if let frame = await queue.next(timeout: min(timeout, 0.12)) {
+        // Short wait only: encoding never happens on this path any more, so a queued frame is
+        // either there or about to be. Waiting longer just delays the dash.
+        if let frame = await queue.next(timeout: min(timeout, 0.15)) {
             lock.lock(); servedCount += 1; lock.unlock()
             return frame
         }
 
-        // The dash pulls at ~20 fps whether or not CarPlay produced anything new: input drops to
-        // 1-2 fps on a static screen. Answer from the last picture instead of returning nothing,
-        // which the link treats as a miss and eventually tears the session down for.
+        // Nothing new. The dash still expects one frame per pull, and CarPlay falls to 1-2 fps on a
+        // static screen, so resend the last IDR: it costs no encoding, and a dash whose decoder lost
+        // its references can always resume on a keyframe. Re-encoding the last picture (the previous
+        // approach) both burned CPU and produced P-frames such a decoder cannot use.
         lock.lock()
-        let cached = fittedBuffer
-        let idle = latestImage
+        let keyframe = lastKeyframeAU
         let canvas = self.canvas
         lock.unlock()
-        let prepared = cached ?? (idle.flatMap { image in
-            canvas.flatMap { try? fitted(image, width: $0.width, height: $0.height) }
-        })
-        if let prepared, let canvas, let frame = encode(prepared, canvas: canvas) {
-            lock.lock(); servedCount += 1; repeatedCount += 1; lock.unlock()
-            return EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
-                                presentationTime: ProcessInfo.processInfo.systemUptime,
-                                sequence: nextSequence())
+        if let keyframe, canvas != nil {
+            lock.lock()
+            servedCount += 1; repeatedCount += 1
+            sequence &+= 1
+            let seq = sequence
+            lock.unlock()
+            return EncodedFrame(accessUnit: keyframe, isKeyframe: true,
+                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
         }
 
-        // Nothing has ever been decoded yet (no CarPlay picture): let the pull miss.
-        let remaining = max(0, timeout - 0.12)
+        // No picture has ever been encoded (CarPlay has not produced anything yet): let it miss.
+        let remaining = max(0, timeout - 0.15)
         if remaining > 0, let frame = await queue.next(timeout: remaining) {
             lock.lock(); servedCount += 1; lock.unlock()
             return frame
@@ -170,6 +180,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     }
 
     func shutdown() {
+        patternTask?.cancel(); patternTask = nil
         lock.lock()
         stopped = true
         decoder?.invalidate(); decoder = nil
@@ -182,6 +193,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     /// Called by the receiver for every access unit CarPlay produces. Never blocks the caller.
     func append(_ data: Data, codec: VideoCodec, keyframe: Bool) {
+        if testPattern { return }
         guard codec == .h264 else {
             // CarPlay negotiated HEVC: EasyConn carries H.264, so nothing can be sent.
             lock.lock(); nonH264 += 1; lock.unlock()
@@ -324,7 +336,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 // The VideoToolbox callback runs on its own thread, so hand the result back through
                 // the lock instead of a local variable captured by the escaping closure.
                 encoder = try H264Encoder(width: canvas.width, height: canvas.height,
-                                          fps: settings.frameRate, bitrate: settings.bitrate) { [weak self] outcome in
+                                          fps: settings.frameRate, bitrate: settings.bitrate,
+                                          profileLevel: .baseline31) { [weak self] outcome in
                     guard let self else { return }
                     self.lock.lock(); self.encodedResult = outcome; self.lock.unlock()
                 }
@@ -359,9 +372,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             }
             lock.lock(); encodedResult = nil; lock.unlock()
             let frame = try outcome?.get()
-            if frame?.isKeyframe == true {
+            if let frame, frame.isKeyframe {
                 lastKeyframe = now
-                lock.lock(); waitingForIDR = false; lock.unlock()
+                lock.lock(); lastKeyframeAU = frame.data; waitingForIDR = false; lock.unlock()
             }
             return frame
         } catch H264EncoderError.frameDropped {
@@ -428,5 +441,91 @@ private final class DecodeBox: @unchecked Sendable {
             if ProcessInfo.processInfo.systemUptime >= deadline { return nil }
             Thread.sleep(forTimeInterval: 0.002)
         }
+    }
+}
+
+// MARK: - Test pattern
+
+extension CfMotoVideoSource {
+    /// Starts the synthetic source once a canvas is known. Idempotent.
+    fileprivate func startPatternIfNeeded() {
+        guard testPattern, patternTask == nil else { return }
+        patternTask = Task { [weak self] in
+            var tick = 0
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.emitPattern(tick)
+                tick &+= 1
+                try? await Task.sleep(nanoseconds: 66_000_000)   // ~15 fps
+            }
+        }
+    }
+
+    /// Draws colour bars with a moving marker and pushes them through the normal encode path.
+    fileprivate func emitPattern(_ tick: Int) {
+        lock.lock()
+        let canvas = self.canvas
+        let alive = !stopped
+        lock.unlock()
+        guard alive, let canvas else { return }
+
+        guard let buffer = drawPattern(width: canvas.width, height: canvas.height, tick: tick) else { return }
+        lock.lock(); decodedCount += 1; fittedBuffer = buffer; lock.unlock()
+        guard let frame = encode(buffer, canvas: canvas) else { return }
+        lock.lock()
+        encodedCount += 1
+        sequence &+= 1
+        let seq = sequence
+        lock.unlock()
+        queue.push(EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
+                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq))
+    }
+
+    fileprivate func drawPattern(width: Int, height: Int, tick: Int) -> CVPixelBuffer? {
+        var buffer: CVPixelBuffer?
+        let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary
+        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
+                                  attributes, &buffer) == kCVReturnSuccess, let buffer else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let bitmap = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let context = CGContext(data: base, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: bitmap) else { return nil }
+
+        let w = CGFloat(width), h = CGFloat(height)
+        context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: w, height: h))
+
+        // SMPTE-ish bars: a swapped colour channel is immediately visible on the dash.
+        let bars: [(CGFloat, CGFloat, CGFloat)] = [
+            (0.75, 0.75, 0.75), (0.75, 0.75, 0), (0, 0.75, 0.75), (0, 0.75, 0),
+            (0.75, 0, 0.75), (0.75, 0, 0), (0, 0, 0.75), (0.1, 0.1, 0.1)
+        ]
+        let barW = w / CGFloat(bars.count)
+        let barH = h * 0.72
+        for (index, colour) in bars.enumerated() {
+            context.setFillColor(CGColor(red: colour.0, green: colour.1, blue: colour.2, alpha: 1))
+            context.fill(CGRect(x: CGFloat(index) * barW, y: h - barH, width: barW + 1, height: barH))
+        }
+
+        // Corner markers: red top-left, green top-right. Rotated or flipped output shows up here.
+        context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: h - 40, width: 40, height: 40))
+        context.setFillColor(CGColor(red: 0, green: 1, blue: 0, alpha: 1))
+        context.fill(CGRect(x: w - 40, y: h - 40, width: 40, height: 40))
+
+        // Moving bar: proves frames are arriving, and at what rate.
+        let travel = w - 60
+        let x = CGFloat(tick % 90) / 90 * travel
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: x, y: h * 0.80, width: 60, height: 16))
+
+        // Progress bar on the bottom edge fills once per 90 ticks (~6 s), a coarse clock.
+        context.setFillColor(CGColor(red: 0.2, green: 0.8, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: w * CGFloat(tick % 90) / 90, height: 10))
+
+        return buffer
     }
 }

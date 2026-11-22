@@ -31,6 +31,8 @@ struct ReceiverConfiguration {
     var cfmotoAddress: String?
     /// EasyConn EC service port. The CFMOTO T-Box answers its probe on 10930.
     var cfmotoPort: String = "10930"
+    /// Serve colour bars instead of CarPlay frames: tests the EasyConn path on its own.
+    var cfmotoTestPattern = false
     var ninebotAddress: String?
     var tailingAddress: String?
     var tailingPhoneInfo: TailingPhoneInfo?

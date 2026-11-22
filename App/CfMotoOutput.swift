@@ -21,6 +21,8 @@ final class CfMotoOutput {
     /// Recreated on every start: shutting a source down closes its frame queue, so reusing the
     /// instance after Stop would leave the next session with a queue nothing can push into.
     private var source = CfMotoVideoSource()
+    /// Serve colour bars instead of CarPlay frames (bench test of the link alone).
+    var testPattern = false
     private let lock = NSLock()
     private var link: EasyConnLink?
     private var pump: Task<Void, Never>?
@@ -37,6 +39,7 @@ final class CfMotoOutput {
 
         // A fresh frame source per session (see the property comment).
         source = CfMotoVideoSource()
+        source.testPattern = testPattern
         source.log = { [weak self] line in
             guard let self else { return }
             self.lock.lock()
@@ -131,6 +134,19 @@ final class CfMotoOutput {
         let head = "CarWithin \(version) (\(build)) · CFMOTO \(lastState) · \(source.counters) · " +
             (isUp ? "link=up" : "link=down")
         return tail.isEmpty ? head : head + "\n--- 最近日志 ---\n" + tail
+    }
+
+    /// Every EasyConn log line kept so far, for the Wi-Fi log endpoint.
+    var logDump: String {
+        let (head, lines) = lock.withLock { (diagnosticsHeadUnlocked(), recent) }
+        return lines.isEmpty ? head : head + "\n--- 日志 ---\n" + lines.joined(separator: "\n")
+    }
+
+    private func diagnosticsHeadUnlocked() -> String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "CarWithin \(version) (\(build)) · CFMOTO \(lastState) · \(source.counters) · " +
+            (link != nil ? "link=up" : "link=down")
     }
 
     func stop() {
