@@ -130,6 +130,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let appearanceControl = ChoiceMenu(items: ReceiverConfiguration.Appearance.allCases.map(\.title))
     /// CarPlay keys under the inline video.
     private let controlBar = UIStackView()
+    /// Direction pad under the CarPlay picture: this dashboard has no touch screen, so the menu
+    /// needs a knob the rider can operate from the phone.
+    private let directionPad = DirectionPad()
     private let secureBrowserURLLabel = UILabel()
     private let secureBrowserCopyButton = UIButton(type: .system)
     private let secureBrowserRow = UIStackView()
@@ -580,6 +583,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         fullscreenButton.isHidden = false; pictureInPictureButton.isHidden = false
         videoActions.tag = 8801
         stack.addArrangedSubview(videoActions)
+        directionPad.isHidden = true
+        directionPad.onPress = { [weak self] control, _ in
+            self?.receiver.press(control)
+        }
+        stack.addArrangedSubview(directionPad)
         Self.barControls.forEach { controlBar.addArrangedSubview(makeControlButton($0)) }
         controlBar.axis = .horizontal; controlBar.distribution = .fillEqually; controlBar.spacing = 8
         controlBar.isHidden = true
@@ -621,7 +629,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                     self.clearStartupHint()
                     self.networkStartupTask?.cancel()
                     self.networkStartupTask = nil
-                    self.videoActions.isHidden = false; self.controlBar.isHidden = false
+                    self.videoActions.isHidden = false; self.controlBar.isHidden = false; self.directionPad.isHidden = false
                     self.log("视频已送入本机显示层")
                     if UIDevice.current.userInterfaceIdiom == .pad { self.showFullscreen() }
                     self.updatePictureInPicturePolicy()
@@ -1716,7 +1724,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         screenAdaptation?.cancel(); screenAdaptation = nil
         reportedScreen = nil; primaryViewer = nil; pendingRestartReason = nil
         pictureInPicture.stop(); keepAlive.stop(); skippedLocalVideo = false
-        hideFullscreen(); videoActions.isHidden = true; controlBar.isHidden = true
+        hideFullscreen(); videoActions.isHidden = true; controlBar.isHidden = true; directionPad.isHidden = true
         displayedVideo = false; didRequestImmediatePiP = false
         videoSurface.reset(); inlineVideoContainer.isHidden = true
         receiver.onListening = nil; bluetooth.stop(); sameDevice.stop(); controlBrowser.stop(); receiver.stop()
