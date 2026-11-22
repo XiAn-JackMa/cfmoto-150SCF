@@ -257,10 +257,19 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                                forceKeyframe: force)
             encoder.complete()
 
-            let outcome = lock.withLock { () -> Result<H264EncodedFrame, Error>? in
-                defer { encodedResult = nil }
-                return encodedResult
+            // complete() returns when VideoToolbox has finished, but the callback that carries the
+            // access unit runs on its own thread and may land a moment later. Reading the box once,
+            // immediately, lost every frame after the first: the late result was then consumed by the
+            // *next* encode, so each read saw nil. Wait for it, briefly.
+            var outcome = lock.withLock { encodedResult }
+            if outcome == nil {
+                let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+                while outcome == nil, ProcessInfo.processInfo.systemUptime < deadline {
+                    Thread.sleep(forTimeInterval: 0.002)
+                    outcome = lock.withLock { encodedResult }
+                }
             }
+            lock.lock(); encodedResult = nil; lock.unlock()
             let frame = try outcome?.get()
             if frame?.isKeyframe == true {
                 lastKeyframe = now

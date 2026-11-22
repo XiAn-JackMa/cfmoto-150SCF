@@ -2664,7 +2664,14 @@ extension ReceiverViewController {
                     .field("车机 IP 地址", cfmotoAddressField, placeholder: "192.168.0.1"),
                     .field("EasyConn 端口", cfmotoPortField, placeholder: "10930")
                 ]),
-            SettingsSection("连接状态", footer: "此输出与上面选择的投屏方式同时运行，可独立开关。", [.note(cfmotoStatus)])
+            SettingsSection("连接状态", footer: "此输出与上面选择的投屏方式同时运行，可独立开关。日志一闪而过时，用下面的按钮把当前诊断信息复制出来。", [
+                .note(cfmotoStatus),
+                .action("复制诊断信息", icon: ("doc.on.doc", .systemBlue)) { [weak self] in
+                    let text = self?.receiver.cfmotoDiagnostics ?? "EasyConn 未运行"
+                    UIPasteboard.general.string = text
+                    self?.log("已复制：\(text)")
+                }
+            ])
         ]
     }
 

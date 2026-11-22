@@ -58,7 +58,7 @@ final class CfMotoOutput {
             localHost: localAddress.isEmpty ? nil : localAddress,
             dashHost: dash.isEmpty ? nil : dash,
             connectBackTimeout: 10,
-            stallTimeout: 8,
+            stallTimeout: 20,
             stallReconnectCooldown: 20,
             maxReconnectAttempts: 20,
             framePullTimeout: 3)
@@ -101,9 +101,12 @@ final class CfMotoOutput {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard let self, self.lock.withLock({ self.link != nil }) else { return }
-                // The card flickered because it was rewritten every few seconds while the link
-                // reconnected. Counters belong in the log, which is stable and copyable.
                 self.onLog?("CFMOTO \(self.lastState) | \(self.source.counters)")
+                // The card is the only place a rider can read this; the settings screen adds a
+                // copy button because the log list has no copy affordance.
+                DispatchQueue.main.async {
+                    self.onState?("\(self.lastState) | \(self.source.counters)")
+                }
             }
         }
         link.start()
@@ -112,6 +115,14 @@ final class CfMotoOutput {
     func append(_ data: Data, codec: VideoCodec, keyframe: Bool) {
         guard lock.withLock({ link != nil }) else { return }
         source.append(data, codec: codec, keyframe: keyframe)
+    }
+
+    /// Everything needed to diagnose a stalled link, for the settings screen's copy button.
+    var diagnostics: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let linkState = lock.withLock { link != nil } ? "link=up" : "link=down"
+        return "CarWithin \(version) (\(build)) · CFMOTO \(lastState) · \(source.counters) · \(linkState)"
     }
 
     func stop() {

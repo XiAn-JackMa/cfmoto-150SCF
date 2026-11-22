@@ -56,6 +56,8 @@ final class NativeReceiver {
     /// EasyConn output to a CFMOTO / Carbit dashboard.
     private let cfmoto = CfMotoOutput()
     var onCfMotoState: ((String) -> Void)?
+    /// Snapshot for the settings screen's copy button.
+    var cfmotoDiagnostics: String { cfmoto.diagnostics }
     private lazy var carLink = CarLinkRelay(queue: queue)
     var onCarLifeState: ((String) -> Void)?
     var onCarLinkState: ((String) -> Void)?
