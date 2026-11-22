@@ -1925,7 +1925,13 @@ extension ReceiverViewController {
         cfmotoPortField.text = defaults.string(forKey: "cfmotoPort") ?? "10930"
         cfmotoPortField.keyboardType = .numberPad
         cfmotoPortField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
-        updateCfMotoStatus("等待启动 CarPlay。")
+        if let crash = CrashCatcher.previousException() {
+            // The previous run died of an exception; that text is the only trace on a sideloaded build.
+            log("上次闪退：\(crash)")
+            updateCfMotoStatus("上次闪退：\(crash.split(separator: "\n").first.map(String.init) ?? crash)")
+        } else {
+            updateCfMotoStatus("等待启动 CarPlay。")
+        }
         updateCarLifeStatus("等待启动 CarPlay。")
         updateAirPlayStatus("等待启动 CarPlay。")
         videoOutputSwitch.isOn = defaults.object(forKey: "videoOutputEnabled") as? Bool ?? true
