@@ -96,13 +96,29 @@ final class CfMotoOutput {
         source.shutdown()
     }
 
+    /// Turns engine events into something readable at the bike: state, negotiated canvas, pull counts.
     private static func describe(_ event: LinkEvent) -> String {
-        let text = String(describing: event)
-        if text.localizedCaseInsensitiveContains("streaming") { return "正在投屏 · 车机已连接" }
-        if text.localizedCaseInsensitiveContains("handshak") { return "已找到车机，握手中…" }
-        if text.localizedCaseInsensitiveContains("fail") || text.localizedCaseInsensitiveContains("error") {
-            return "连接失败：\(text)"
+        switch event {
+        case .state(let state):
+            switch state {
+            case .streaming: return "正在投屏 · 车机已连接"
+            case .handshaking: return "已找到车机，握手中…"
+            case .awaitingCallback: return "等待车机回连…"
+            case .probing(let attempt): return "正在探测车机（第 \(attempt) 次）…"
+            case .startingServers: return "正在监听 10920-10922…"
+            case .idle: return "未启动"
+            default: return "状态：\(state)"
+            }
+        case .dashIdentified(let info):
+            return "已识别车机：\(info)"
+        case .canvas(let canvas):
+            return "车机画布 \(canvas.width)×\(canvas.height)（请求 \(canvas.requestedWidth)×\(canvas.requestedHeight)）"
+        case .mediaStarted:
+            return "车机开始拉流"
+        case .touch(let touch):
+            return "触摸：\(touch)"
+        case .stats(let stats):
+            return "统计：\(stats)"
         }
-        return text
     }
 }

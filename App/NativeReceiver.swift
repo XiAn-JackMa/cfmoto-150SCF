@@ -126,8 +126,8 @@ final class NativeReceiver {
                 self.cfmoto.onKeyframeRequest = { [weak self] in
                     self?.requestKeyFrame(reason: "CFMOTO 解码恢复")
                 }
-                self.cfmoto.start(localAddress: configuration.address, targetAddress: target,
-                                  port: configuration.cfmotoPort)
+                self.cfmoto.start(localAddress: ReceiverConfiguration.wifiIPv4Address() ?? configuration.address,
+                                  targetAddress: target, port: configuration.cfmotoPort)
             }
             if configuration.carLifeEnabled {
                 self.carLife.onLog = { [weak self] in self?.log($0) }
