@@ -165,10 +165,16 @@ final class NativeReceiver {
                 self.cfmoto.start(localAddress: ReceiverConfiguration.wifiIPv4Address() ?? configuration.address,
                                   targetAddress: target, port: configuration.cfmotoPort)
                 // Read the log from a PC instead of copying it off the phone by hand.
-                self.cfmotoLogServer.start { [weak self] in
+                self.cfmotoLogServer.text = { [weak self] in
                     guard let self else { return "" }
                     return self.cfmotoDiagnostics + "\n\n" + self.cfmotoLogText
                 }
+                self.cfmotoLogServer.page = { [weak self] since in
+                    guard let self else { return (since, []) }
+                    return self.cfmoto.store.lines(from: since)
+                }
+                self.cfmotoLogServer.onLog = { [weak self] in self?.log($0) }
+                self.cfmotoLogServer.start()
             }
             if configuration.carLifeEnabled {
                 self.carLife.onLog = { [weak self] in self?.log($0) }

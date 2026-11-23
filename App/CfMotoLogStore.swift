@@ -19,6 +19,9 @@ final class CfMotoLogStore {
 
     private let lock = NSLock()
     private var lines: [String] = []
+    /// Index of lines[0] in the stream since the app started. Trimmed lines bump it, so a reader
+    /// that remembers an index keeps getting exactly the lines it has not seen.
+    private var firstIndex = 0
     private var handle: FileHandle?
     private let fileURL: URL?
 
@@ -71,9 +74,26 @@ final class CfMotoLogStore {
         let line = "\(Self.stamp.string(from: Date())) \(message)"
         lock.lock()
         lines.append(line)
-        if lines.count > capacity { lines.removeFirst(lines.count - capacity) }
+        if lines.count > capacity {
+            let drop = lines.count - capacity
+            lines.removeFirst(drop)
+            firstIndex += drop
+        }
         if let data = (line + "\n").data(using: .utf8) { try? handle?.write(contentsOf: data) }
         lock.unlock()
+    }
+
+    /// Total lines appended since launch, including those already dropped from memory.
+    var totalLines: Int { lock.lock(); defer { lock.unlock() }; return firstIndex + lines.count }
+
+    /// Lines from `index` onwards, and the index to ask for next time. Reading from memory keeps a
+    /// remote viewer in step with what is on screen; anything older is only in the file.
+    func lines(from index: Int, limit: Int = 400) -> (next: Int, lines: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        let start = max(index - firstIndex, 0)
+        guard start < lines.count else { return (firstIndex + lines.count, []) }
+        let end = min(start + limit, lines.count)
+        return (firstIndex + end, Array(lines[start..<end]))
     }
 
     var text: String {

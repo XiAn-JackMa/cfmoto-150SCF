@@ -459,8 +459,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // picture is being rescaled - the three things that explain a soft or stuttering dash.
         outputInfoLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         outputInfoLabel.textColor = .secondaryLabel
-        outputInfoLabel.numberOfLines = 2
+        outputInfoLabel.numberOfLines = 0
         outputInfoLabel.textAlignment = .center
+        outputInfoLabel.lineBreakMode = .byWordWrapping
+        outputInfoLabel.setContentCompressionResistancePriority(.required, for: .vertical)
         outputInfoLabel.isHidden = true
         heroStack.addArrangedSubview(outputInfoLabel)
 
@@ -1235,8 +1237,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         let s = receiver.cfmotoLiveStats
         let fps = String(format: "%.1f", s.servedFPS)
-        outputInfoLabel.text = "输出 \(s.canvasSize) · \(fps) fps" + "\n" +
-            "CarPlay \(s.carPlaySize) · 缩放 \(s.scaleText) · 补帧 \(Int(s.paddedRatio * 100))% · 关键帧 \(Int(s.keyframeRatio * 100))%"
+        outputInfoLabel.text = [
+            "输出 \(s.canvasSize) · \(fps) fps",
+            "CarPlay \(s.carPlaySize) · 缩放 \(s.scaleText)",
+            "补帧 \(Int(s.paddedRatio * 100))% · 关键帧 \(Int(s.keyframeRatio * 100))% · 平均 \(String(format: "%.1f", s.averageFrameKB)) KB"
+        ].joined(separator: "\n")
         outputInfoLabel.isHidden = false
         previewInfoLabel.text = "车机 \(s.canvasSize) · \(fps) fps · \(s.scaleText)"
         previewInfoLabel.isHidden = !displayedVideo
@@ -2432,6 +2437,29 @@ extension ReceiverViewController {
             : "当前：\(CfMotoTuning.summary)"
     }
 
+    /// Where the live log page is served from, or nil when the phone has no Wi-Fi address.
+    private var cfmotoLogURL: String? {
+        guard let ip = ReceiverConfiguration.wifiIPv4Address() else { return nil }
+        return "http://\(ip):\(CfMotoLogServer.defaultPort)/"
+    }
+
+    private func openCfMotoLogPage() {
+        guard let text = cfmotoLogURL, let url = URL(string: text) else {
+            appendCfMotoLog("日志服务地址未知：请先连接 Wi-Fi")
+            return
+        }
+        UIApplication.shared.open(url)
+    }
+
+    private func copyCfMotoLogURL() {
+        guard let text = cfmotoLogURL else {
+            appendCfMotoLog("日志服务地址未知：请先连接 Wi-Fi")
+            return
+        }
+        UIPasteboard.general.string = text
+        appendCfMotoLog("日志服务地址已复制：\(text)")
+    }
+
     @objc private func resetCfMotoTuning() {
         CfMotoTuning.reset()
         syncCfMotoTuningFields()
@@ -3156,6 +3184,12 @@ extension ReceiverViewController {
                 ]),
             SettingsSection("连接状态", footer: "日志同时写入 Documents/CarWithin-easyconn.log，崩溃或强退都不会丢。车边测试推荐直接「分享日志文件」，可 AirDrop / 微信 / 存到「文件」。", [
                 .view(cfmotoLogView),
+                .action("浏览器打开实时日志", icon: ("safari", .systemBlue), detail: { [weak self] in self?.cfmotoLogURL }) { [weak self] in
+                    self?.openCfMotoLogPage()
+                },
+                .action("复制日志地址", icon: ("link", .systemTeal), detail: { [weak self] in self?.cfmotoLogURL }) { [weak self] in
+                    self?.copyCfMotoLogURL()
+                },
                 .action("分享日志文件", icon: ("square.and.arrow.up", .systemBlue)) { [weak self] in
                     self?.shareCfMotoLog()
                 },
