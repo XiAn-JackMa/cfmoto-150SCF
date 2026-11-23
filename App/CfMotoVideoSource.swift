@@ -29,6 +29,9 @@ struct CfMotoLiveStats {
     var keyframeRatio: Double = 0
     var averageFrameKB: Double = 0
     var counters = ""
+    /// False until a picture has actually been served, which is what separates "CarPlay has
+    /// nothing new to show" from "CarPlay never started".
+    var hasPicture = false
 
     /// "1024×512 · 19.8 fps · 1:1" - the one line both readouts show.
     var summary: String {
@@ -66,7 +69,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var lastServedWasKeyframe = false
     /// Last time CarPlay handed us a picture. A long silence means the black frames the dash is
     /// seeing come from CarPlay, not from the EasyConn output, and the log should say so.
-    private var lastInboundAt = Date.distantPast
+    /// Seeded at construction so the readout never subtracts distantPast - it printed
+    /// 63931217258 seconds before the first session had prepared a canvas.
+    private var lastInboundAt = Date()
 
     /// Synthetic colour-bar source: validates the whole EasyConn path (canvas, encoder, framing,
     /// pulls, repeats) without waiting for CarPlay, on the bench or on the bike.
@@ -469,7 +474,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             paddedRatio: servedCount > 0 ? Double(repeatedCount) / Double(servedCount) : 0,
             keyframeRatio: servedCount > 0 ? Double(servedKeyframes) / Double(servedCount) : 0,
             averageFrameKB: servedCount > 0 ? Double(servedBytes) / Double(servedCount) / 1024 : 0,
-            counters: countersLocked())
+            counters: countersLocked(),
+            hasPicture: servedCount > 0)
     }
 
     // MARK: - Decode

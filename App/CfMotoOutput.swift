@@ -294,15 +294,19 @@ final class CfMotoOutput {
         }
         log(text)
     }
-
-    /// Reports a CarPlay silence once, naming the component at fault.
+    /// Reports a CarPlay silence, but only when there is genuinely no picture.
+    ///
+    /// A static CarPlay screen sends almost nothing: the field run shows 7.7 access units a second
+    /// against a dash pulling 20 times, which is normal. Warning "the dash is black" while the dash
+    /// was in fact showing a perfectly good frozen map was simply wrong, so this now speaks only
+    /// when nothing has ever been served.
     private func noteCarPlaySilence(_ idle: TimeInterval) {
+        guard !source.liveStats.hasPicture else { return }
         let seconds = Int(idle)
         guard seconds / 10 != lastSilenceSeconds / 10 else { return }
         lastSilenceSeconds = seconds
-        log("[警告] CarPlay 已 \(seconds) 秒没有输出画面，车机显示的是黑屏 —— 问题在 CarPlay 会话，EasyConn 链路正常")
+        log("[警告] CarPlay 已 \(seconds) 秒没有输出任何画面，车机是黑屏 —— 问题在 CarPlay 会话，EasyConn 链路正常")
     }
-
     /// Last time a link was stopped, so a restart can leave the dash time to finish its own teardown.
     private var lastStopAt = Date.distantPast
     /// How long to wait before re-probing. The dash only notices an abrupt close when its sockets
