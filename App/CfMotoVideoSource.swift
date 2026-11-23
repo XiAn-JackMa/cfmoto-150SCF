@@ -33,10 +33,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Last keyframe access unit, resent when a pull finds nothing new: no encoding, and a dash
     /// that lost its reference frames can always resume on it.
     private var lastKeyframeAU: Data?
-    /// Last access unit that encoded successfully, of any kind. The pull path answers with it rather
-    /// than returning nothing: a lock-step link treats an empty reply as a dead one.
-    private var lastEncodedAU: Data?
-    private var lastEncodedWasKeyframe = false
+
     /// Synthetic colour-bar source: validates the whole EasyConn path (canvas, encoder, framing,
     /// pulls, repeats) without waiting for CarPlay, on the bench or on the bike.
     var testPattern = false
@@ -131,7 +128,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         if sizeChanged {
             // A keyframe of the previous canvas must never answer a pull for this one: a cached
             // access unit from the old size would decode as garbage on the dash.
-            lock.lock(); fittedBuffer = nil; lastEncodedAU = nil; lastKeyframeAU = nil; lock.unlock()
+            lock.lock(); fittedBuffer = nil; lastKeyframeAU = nil; lock.unlock()
             queue.invalidateKeyframe()
             queue.resynchronize()
         }
@@ -139,12 +136,24 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         startPatternIfNeeded()
     }
 
+    /// Hard reset, the equivalent of the reference client's `restartStream()`: drop the decoder and
+    /// the queued frames, mark that the next frame must be a keyframe, and ask CarPlay for one.
+    ///
+    /// Used when the app comes back from the background, where the decompression session is the part
+    /// that does not survive. Dropping it is what makes the rebuild deterministic; keeping a decoder
+    /// that has silently stopped delivering is what froze the dash (decoder nil while waitingForIDR
+    /// stayed false, so nothing ever rebuilt it).
     func resynchronize() {
         lock.lock()
+        decoder?.invalidate()
+        decoder = nil
+        decodeBox = DecodeBox()
         waitingForIDR = true
         waitingSince = Date()
         lock.unlock()
+        queue.invalidateKeyframe()
         queue.resynchronize()
+        onKeyframeRequest?()
     }
 
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
@@ -183,32 +192,13 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             diagnose("等关键帧 \(Int(Date().timeIntervalSince(since)))s，先用缓存帧维持会话")
             onKeyframeRequest?()
         }
-        if let prepared, let canvas, let frame = encode(prepared, canvas: canvas) {
-            lock.lock()
-            servedCount += 1; repeatedCount += 1
-            sequence &+= 1
-            let seq = sequence
-            lock.unlock()
-            return EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
-                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
-        }
-        // Encoding is unavailable right now (session being rebuilt, or CarPlay has not produced a
-        // picture yet). Answer with the last access unit that did encode: a slightly old picture is
-        // far better than stalling a lock-step link.
+        // Repeat the last *keyframe*, the way the reference client does (cfmoto-ios
+        // H264Encoder.lastKeyframe + restartStream). A repeated P-frame is a spec violation
+        // (§15.2) because re-applying it corrupts the dash's picture; an IDR is self-contained and
+        // therefore safe to resend as often as a pull needs.
         lock.lock()
-        let cached = lastEncodedAU
-        let cachedIsKeyframe = lastEncodedWasKeyframe
         let keyframe = lastKeyframeAU
         lock.unlock()
-        if let cached {
-            lock.lock()
-            servedCount += 1; repeatedCount += 1
-            sequence &+= 1
-            let seq = sequence
-            lock.unlock()
-            return EncodedFrame(accessUnit: cached, isKeyframe: cachedIsKeyframe,
-                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
-        }
         if let keyframe {
             lock.lock()
             servedCount += 1; repeatedCount += 1
@@ -464,16 +454,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             }
             lock.lock(); encodedResult = nil; lock.unlock()
             let frame = try outcome?.get()
-            if let frame {
-                lock.lock()
-                lastEncodedAU = frame.data
-                lastEncodedWasKeyframe = frame.isKeyframe
-                if frame.isKeyframe {
-                    lastKeyframe = now
-                    lastKeyframeAU = frame.data
-                    waitingForIDR = false
-                }
-                lock.unlock()
+            if let frame, frame.isKeyframe {
+                lastKeyframe = now
+                lock.lock(); lastKeyframeAU = frame.data; waitingForIDR = false; lock.unlock()
             }
             return frame
         } catch H264EncoderError.frameDropped {

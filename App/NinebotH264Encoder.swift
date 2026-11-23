@@ -165,6 +165,22 @@ final class H264Encoder {
         } catch {
             VTCompressionSessionInvalidate(created)
             session = nil
+            // The session can be created and still refuse to start - which is what the hardware
+            // encoder does once the app has been in the background. Falling back only on
+            // creation failure left the dash with no picture at all, so try software here too.
+            let software = ["EnableHardwareAcceleratedVideoEncoder": false] as CFDictionary
+            let (retryStatus, retried) = create(software)
+            if retryStatus == noErr, let retried {
+                do {
+                    try configure(retried, bitrate: bitrate)
+                    session = retried
+                    usingSoftware = true
+                    return
+                } catch {
+                    VTCompressionSessionInvalidate(retried)
+                    session = nil
+                }
+            }
             throw error
         }
     }

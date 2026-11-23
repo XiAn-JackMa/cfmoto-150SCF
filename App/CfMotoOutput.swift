@@ -25,6 +25,13 @@ final class CfMotoOutput {
     /// Serve colour bars instead of CarPlay frames (bench test of the link alone).
     private(set) var testPattern = false
 
+    /// Hard reset of the video pipeline (decoder + queues + keyframe), used when the app returns to
+    /// the foreground: the decompression session is what does not survive being backgrounded.
+    func resynchronizeVideo() {
+        source.resynchronize()
+        log("回到前台，已重建视频管线")
+    }
+
     /// Live toggle: applies to the running link as well as the next start.
     func setTestPattern(_ on: Bool) {
         testPattern = on

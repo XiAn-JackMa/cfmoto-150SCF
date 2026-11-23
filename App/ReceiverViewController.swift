@@ -1940,7 +1940,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // stops feeding video, the dash keeps pulling, and the picture would freeze on the dash
         // while the phone looks fine. Ask for a keyframe as soon as we are foreground again.
         if outputMode.isEasyConn {
-            receiver.requestKeyFrame(reason: "回到前台，重新同步车机")
+            // Same shape as the reference client's restartStream(): rebuild rather than poke.
+            receiver.resynchronizeCfMotoVideo()
         }
     }
     @objc private func foregrounded() {
