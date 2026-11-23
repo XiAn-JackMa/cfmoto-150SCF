@@ -166,7 +166,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoCanvasOverrideField = UITextField()
     private let cfmotoBaselineSwitch = UISwitch()
     private let cfmotoStaticPadSwitch = UISwitch()
-    private let cfmotoPassthroughSwitch = UISwitch()
     private let cfmotoTuningStatus = UILabel()
     private let cfmotoStatus = StatusLabel()
     /// Every EasyConn line in one scrollable, selectable field: a one-line label cannot be read or
@@ -2072,7 +2071,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         cfmotoBaselineSwitch.isEnabled = value
         cfmotoStaticPadSwitch.isEnabled = value
-        cfmotoPassthroughSwitch.isEnabled = value
         carLifeAddressField.isEnabled = value
     }
     @objc private func willResignActive() {
@@ -2361,7 +2359,6 @@ extension ReceiverViewController {
         cfmotoCanvasOverrideField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
         cfmotoBaselineSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         cfmotoStaticPadSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
-        cfmotoPassthroughSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         syncCfMotoTuningFields()
         if let crash = CrashCatcher.previousException() {
             // The previous run died of an exception; that text is the only trace on a sideloaded build.
@@ -2430,7 +2427,6 @@ extension ReceiverViewController {
         CfMotoTuning.canvasOverride = cfmotoCanvasOverrideField.text
         CfMotoTuning.forceBaseline = cfmotoBaselineSwitch.isOn
         CfMotoTuning.staticPadEnabled = cfmotoStaticPadSwitch.isOn
-        CfMotoTuning.passthroughEnabled = cfmotoPassthroughSwitch.isOn
         syncCfMotoTuningFields()
         appendCfMotoLog("画面参数：\(CfMotoTuning.summary)")
         if running, outputMode.isEasyConn { receiver.applyCfMotoTuning() }
@@ -2446,7 +2442,6 @@ extension ReceiverViewController {
         cfmotoCanvasOverrideField.text = CfMotoTuning.canvasOverride ?? ""
         cfmotoBaselineSwitch.isOn = CfMotoTuning.forceBaseline
         cfmotoStaticPadSwitch.isOn = CfMotoTuning.staticPadEnabled
-        cfmotoPassthroughSwitch.isOn = CfMotoTuning.passthroughEnabled
         cfmotoTuningStatus.text = CfMotoTuning.isDefault
             ? "当前为默认参数（与生产版 MOTO-HUB 对仪表盘的取值一致）"
             : "当前：\(CfMotoTuning.summary)"
@@ -3189,12 +3184,7 @@ extension ReceiverViewController {
                         "「静止画面用轻量补帧」：车机每秒索要 20 帧，画面不动时会重复同一个关键帧，" +
                         "所以线路速率 = 20 × 关键帧大小（6 Mbps 时约 63 KB → 约 10 Mbps）。开启后静止时改用" +
                         "四分之一码率的小包，带宽降到约三分之一；代价是静止画面（你正在看的地图文字）会变糊。" +
-                        "只在需要省流量或降低车机解码压力时打开。" +
-                        "「直通模式」：把 CarPlay 原始 H.264 直接转给车机，不再解码重编码——CPU 和发热降为零，" +
-                        "画质无损、延迟更低，也没有「解码器被系统回收」这一类故障。代价是码率/关键帧/编码档次设置失效，" +
-                        "而且画面静止时需要 CarPlay 留下过关键帧才能重复发送。开启后先看日志里的『CarPlay 原始流』那行：" +
-                        "level 高于 4.1 或含 B 帧重排，老车机可能不接受，那就关掉。" +
-                        "如果车机黑屏或频繁断链，立即关闭本项即可恢复。", [
+                        "只在需要省流量或降低车机解码压力时打开。", [
                     .field("码率（Mbps）", cfmotoBitrateField, placeholder: "2.5"),
                     .field("帧率上限", cfmotoFPSField, placeholder: "30"),
                     .field("关键帧间隔（秒）", cfmotoKeyframeField, placeholder: "1.0"),
@@ -3202,7 +3192,6 @@ extension ReceiverViewController {
                     .field("固定画布（留空跟随车机）", cfmotoCanvasOverrideField, placeholder: "1024x512"),
                     .control("强制 Baseline 3.1", cfmotoBaselineSwitch),
                     .control("静止画面用轻量补帧", cfmotoStaticPadSwitch),
-                    .control("直通模式（不再重新编码）", cfmotoPassthroughSwitch),
                     .note(cfmotoTuningStatus),
                     .action("恢复默认参数", icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
                         self?.resetCfMotoTuning()
