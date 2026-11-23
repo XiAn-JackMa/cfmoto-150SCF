@@ -662,8 +662,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // No output-mode gate: EasyConn is enabled by its address, whatever mode is selected.
         receiver.onCfMotoLog = { [weak self] line in self?.appendCfMotoLog(line) }
         receiver.onCfMotoState = { [weak self] message in
-            guard let self, self.running else { return }
-            self.updateCfMotoStatus(message)
+            // The output raises this from its own queues; the card is UIKit.
+            DispatchQueue.main.async {
+                guard let self, self.running else { return }
+                self.updateCfMotoStatus(message)
+            }
         }
         receiver.onCarLifeState = { [weak self] message in
             guard let self, self.running, self.outputMode == .carLife else { return }

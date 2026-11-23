@@ -70,9 +70,30 @@ final class CfMotoOutput {
         return uuid
     }()
 
-    func start(localAddress: String, targetAddress: String, port: String) {
-        stop()
+    private var pendingStart: Task<Void, Never>?
 
+    func start(localAddress: String, targetAddress: String, port: String) {
+        // The cooldown is measured from the *previous* stop, so read it before stop() refreshes it.
+        let wait = restartDelay
+        pendingStart?.cancel()
+        pendingStart = nil
+        stop()
+        guard wait > 0 else {
+            performStart(localAddress: localAddress, targetAddress: targetAddress, port: port)
+            return
+        }
+        // Give the dash a moment to finish its own teardown: an abrupt close is only visible to it
+        // as EOF, and probing again inside that window is what made Start look like it hung.
+        log(String(format: "等待 %.1f 秒让车机收尾后再重新探测", wait))
+        pendingStart = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.pendingStart = nil
+            self.performStart(localAddress: localAddress, targetAddress: targetAddress, port: port)
+        }
+    }
+
+    private func performStart(localAddress: String, targetAddress: String, port: String) {
         // A fresh frame source per session (see the property comment).
         source = CfMotoVideoSource()
         source.testPattern = testPattern
@@ -230,15 +251,41 @@ final class CfMotoOutput {
             (link != nil ? "link=up" : "link=down")
     }
 
+    /// Last time a link was stopped, so a restart can leave the dash time to finish its own teardown.
+    private var lastStopAt = Date.distantPast
+    /// How long to wait before re-probing. The dash only notices an abrupt close when its sockets
+    /// read EOF, and it keeps its own session state for `socketTimeoutPeriodWifi` (9 s on this
+    /// bike); probing again immediately is what made "start" appear to hang until it was retried a
+    /// few times. Short, because the bike re-probes on its own as soon as the sockets close.
+    private let restartCooldown: TimeInterval = 1.5
+
     func stop() {
-        pump?.cancel(); pump = nil
-        ticker?.cancel(); ticker = nil
+        pendingStart?.cancel()
+        pendingStart = nil
         lock.lock()
         let current = link
         link = nil
         lock.unlock()
+        // Stop the link BEFORE cancelling the pump: link.stop() publishes .state(.stopped), and a
+        // pump that is already cancelled drops it, which left the log ending mid-sentence and made
+        // Stop look like it never disconnected anything.
         current?.stop()
+        pump?.cancel(); pump = nil
+        ticker?.cancel(); ticker = nil
         source.shutdown()
+        // The cooldown only matters when a link was actually up: NativeReceiver starts by calling
+        // stop() as its own cleanup, and counting that would delay every single start by it.
+        if current != nil {
+            lastStopAt = Date()
+            log("EasyConn 已停止：已关闭 10920/10921/10922 与探测连接，车机将看到 EOF")
+            // stop() can run on the receiver queue; the card is UIKit.
+            DispatchQueue.main.async { [weak self] in self?.onState?("已停止") }
+        }
+    }
+
+    /// Seconds still to wait before this output may start again (0 when it is allowed now).
+    var restartDelay: TimeInterval {
+        max(0, restartCooldown - Date().timeIntervalSince(lastStopAt))
     }
 
     /// Turns engine events into something readable at the bike: state, negotiated canvas, pull counts.
