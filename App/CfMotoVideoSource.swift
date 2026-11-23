@@ -101,7 +101,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// When the decoder started waiting for a keyframe. A long wait means the link died while the
     /// app was in the background, and repeating the last picture would freeze the dash for good.
     private var decoderWaitingSince = Date.distantPast
-    private let idrGiveUpAfter: TimeInterval = 2.0
+    /// How long a pull may keep being answered from the cached picture before CarPlay is asked for
+    /// a keyframe. Configured by CfMotoTuning.idrWaitSeconds.
+    private var idrGiveUpAfter: TimeInterval = 2.0
     private var sequence: UInt64 = 0
     private var lastCodecFailure = -Double.infinity
     private var lastKeyframe = -Double.infinity
@@ -174,13 +176,20 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var lastPadRejectLog: TimeInterval = 0
 
     /// How long the picture must have been unchanged before a pad is worth making.
-    static let staticIdleSeconds: TimeInterval = 0.35
+    /// Seconds the picture must be unchanged before the static pad applies (CfMotoTuning).
+    private var staticIdleSeconds: TimeInterval = 0.35
     /// Bumped for every freshly decoded picture, so a cached pad can be checked for staleness.
     private var pictureGeneration = 0
     private var padCount = 0
     /// Cached copy of CfMotoTuning.staticPadEnabled: the pull path runs 20 times a second and a
     /// UserDefaults read per pull is not free. Refreshed whenever the tuning is applied.
     private var staticPadOn = false
+    /// Cached copies of the pull-path tuning values, read once when the tuning is applied instead
+    /// of on every pull.
+    private var bufferDepth = 6
+    /// Every frame is a keyframe: no repeat can reference a picture the dash lost, and no pull
+    /// ever waits for a keyframe. Costs roughly double the bitrate.
+    private var allIntraOn = false
 
     /// One line per session describing the stream CarPlay actually produces. It is the first thing
     /// to look at when the picture is wrong: profile, level and reorder depth decide whether a
@@ -271,6 +280,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         encoderSettings = CfMotoVideoSource.tuned(encoderSettings)
         let stalePadForTuning = padEncoder
         staticPadOn = CfMotoTuning.staticPadEnabled
+        bufferDepth = CfMotoTuning.bufferDepth
+        idrGiveUpAfter = CfMotoTuning.idrWaitSeconds
+        staticIdleSeconds = CfMotoTuning.staticIdleSeconds
+        allIntraOn = CfMotoTuning.allIntra
         padEncoder = nil; padCanvasKey = ""; padKeyframeAU = nil; padGeneration = -1
         lock.unlock()
         old?.invalidate()
@@ -291,6 +304,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         self.canvas = canvas
         self.encoderSettings = CfMotoVideoSource.tuned(parameters)
         self.staticPadOn = CfMotoTuning.staticPadEnabled
+        self.bufferDepth = CfMotoTuning.bufferDepth
+        self.idrGiveUpAfter = CfMotoTuning.idrWaitSeconds
+        self.staticIdleSeconds = CfMotoTuning.staticIdleSeconds
+        self.allIntraOn = CfMotoTuning.allIntra
         let sizeChanged = previous == nil || previous!.width != canvas.width || previous!.height != canvas.height
         var retired: H264Encoder?
         if sizeChanged {
@@ -377,7 +394,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                     profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .auto,
                     // Bias quantisation directly: a lone keyframe after idle would otherwise ignore
                     // the bitrate target entirely.
-                    quality: 0.15
+                    quality: 0.15,
+                    keyframeSeconds: encoderSettings.keyframeIntervalSeconds
                 ) { [weak self] outcome in
                     guard let self else { return }
                     self.lock.lock(); self.padEncodedResult = outcome; self.lock.unlock()
@@ -571,7 +589,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // Only reuse the cache when the frame already sent *was* a keyframe: then the cache and the
         // current picture agree. If the last frame was a P, the cached IDR is older than the picture
         // in hand, and resending it is how the progress bar walked backwards (52 s, 51 s, 52 s).
-        if !dirty, staticPadOn, pictureIdle >= Self.staticIdleSeconds, let prepared, let canvas,
+        if !dirty, staticPadOn, pictureIdle >= staticIdleSeconds, let prepared, let canvas,
            let pad = staticPadAccessUnit(prepared, canvas: canvas) {
             // The still picture, re-compressed small: same content, a fraction of the bytes.
             lock.lock()
@@ -698,7 +716,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         lock.unlock()
         logCarPlayStreamOnce(data)
         lock.lock()
-        let reject = stopped || pending >= 6
+        let reject = stopped || pending >= bufferDepth
         if reject { skipping = !skipping }
         if !reject { pending += 1 }
         let needIDR = skipping
@@ -937,7 +955,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 // the lock instead of a local variable captured by the escaping closure.
                 encoder = try H264Encoder(width: canvas.width, height: canvas.height,
                                           fps: settings.frameRate, bitrate: settings.bitrate,
-                                          profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .auto) { [weak self] outcome in
+                                          profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .auto,
+                                          keyframeSeconds: settings.keyframeIntervalSeconds) { [weak self] outcome in
                     guard let self else { return }
                     self.lock.lock(); self.encodedResult = outcome; self.lock.unlock()
                 }
@@ -952,7 +971,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             // its pull loop can start mid-stream, so force one instead of waiting for a keyframe that
             // may never come from CarPlay.
             let stale = now - lastKeyframe >= max(0.2, encoderSettings.keyframeIntervalSeconds)
-            let keyframeWanted = force || lock.withLock { waitingForIDR } || stale
+            let keyframeWanted = force || allIntraOn || lock.withLock { waitingForIDR } || stale
             try encoder.encode(try fitted(image, width: canvas.width, height: canvas.height),
                                presentationTime: CMTime(seconds: now, preferredTimescale: 1_000_000),
                                forceKeyframe: keyframeWanted)

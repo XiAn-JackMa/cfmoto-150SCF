@@ -112,6 +112,12 @@ final class H264Encoder {
     /// encoder: AverageBitRate alone does not cap a lone keyframe after an idle period, but Quality
     /// biases quantisation directly, so one frame comes out small without rate-control history.
     private let quality: Double?
+    /// Seconds between forced IDRs, passed straight to VideoToolbox.
+    ///
+    /// It used to be hard-wired to one second here while the settings page claimed to control it,
+    /// so raising the interval changed nothing: VideoToolbox still emitted an IDR every second and
+    /// the keyframe share never moved.
+    private let keyframeSeconds: Double
     /// True when the session fell back to the software encoder (App in the background).
     private(set) var usingSoftware = false
 
@@ -126,10 +132,12 @@ final class H264Encoder {
     }
 
     init(width: Int, height: Int, fps: Int, bitrate: Int, profileLevel: ProfileLevel = .auto,
-         quality: Double? = nil, output: @escaping (Result<H264EncodedFrame, Error>) -> Void) throws {
+         quality: Double? = nil, keyframeSeconds: Double = 1.0,
+         output: @escaping (Result<H264EncodedFrame, Error>) -> Void) throws {
         self.fps = fps
         self.profileLevel = profileLevel
         self.quality = quality
+        self.keyframeSeconds = keyframeSeconds
         callbackBox.handler = output
 
         let attributes: [CFString: Any] = [
@@ -206,12 +214,14 @@ final class H264Encoder {
             if let quality { try? set(kVTCompressionPropertyKey_Quality, value: quality as CFNumber) }
             try set(kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
             try set(kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
-            // 关键帧节奏由 MirrorSession 每 0.5 秒强制请求（与官方 iOS 抓包、Android 版一致）；
-            // 这里的 1 秒只是兜底，避免两套计时错开导致每秒 3–4 个关键帧
-            try set(kVTCompressionPropertyKey_MaxKeyFrameInterval, value: fps as CFNumber)
-            try set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 1 as CFNumber)
-            // 硬上限等于平均码率时，每秒一次的关键帧会把预算吃光，紧随其后的帧被丢弃，
-            // 表现为每秒卡顿一下。留 1.5 倍余量吸收关键帧峰值。
+            // Honour the configured interval: both the frame count and the duration, so a 3 s
+            // setting really is 3 s instead of whatever fps implied.
+            let intervalFrames = max(1, Int((keyframeSeconds * Double(fps)).rounded()))
+            try set(kVTCompressionPropertyKey_MaxKeyFrameInterval, value: intervalFrames as CFNumber)
+            try set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: keyframeSeconds as CFNumber)
+            // When the hard limit equals the average bitrate, one keyframe per second eats the
+            // budget and the frames right after it get dropped, seen as a stutter every second;
+            // 1.5x leaves room for the keyframe peak.
             let byteLimit = max(1, bitrate * 3 / 2 / 8)
             try set(kVTCompressionPropertyKey_DataRateLimits, value: [byteLimit, 1] as CFArray)
             // 低延迟：不缓存帧，尽量优先编码速度。部分设备不支持，失败时忽略。
@@ -294,3 +304,4 @@ enum H264EncoderError: LocalizedError {
         }
     }
 }
+

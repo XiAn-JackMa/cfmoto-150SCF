@@ -114,10 +114,11 @@ enum CfMotoTuning {
     static var summary: String {
         let extras = canvasOverrideSize.map { " · 固定画布 \($0.width)×\($0.height)" } ?? ""
         let pad = staticPadEnabled ? String(format: " · 静止补帧 %.1f Mbps", staticPadMbps) : ""
+        let intra = allIntra ? " · 全关键帧" : ""
         return String(format: "%.1f Mbps · %d fps · 关键帧 %.1f 秒 · %@ · 等待画布 %.0f 秒",
                       bitrateMbps, frameRate, keyframeSeconds,
                       forceBaseline ? "Baseline 3.1" : "自动 profile",
-                      canvasWaitSeconds) + extras + pad
+                      canvasWaitSeconds) + extras + pad + intra
     }
 
     static func reset() {
@@ -126,6 +127,49 @@ enum CfMotoTuning {
 
     /// True when every key still holds its default, so the UI can say so.
     static var isDefault: Bool { Key.all.allSatisfy { defaults.object(forKey: $0) == nil } }
+
+    // MARK: Pull path
+
+    /// 2 ... 20 access units CarPlay may get ahead of the dash before frames are dropped.
+    ///
+    /// The dash pulls on a fixed timer, so whatever CarPlay produces beyond that rate is either
+    /// held (smoother, later) or dropped (current, earlier). This is that trade-off as one number.
+    static var bufferDepth: Int {
+        get { Int(clamp(Double((defaults.object(forKey: Key.bufferDepth) as? Int) ?? 6), 2, 20)) }
+        set { defaults.set(Int(clamp(Double(newValue), 2, 20)), forKey: Key.bufferDepth) }
+    }
+
+    /// 0.5 ... 10 s to keep answering pulls with the cached picture while a keyframe is missing.
+    ///
+    /// Short asks CarPlay for a new keyframe sooner; long leaves it alone. Either way the dash is
+    /// answered, because a locked-step pull that gets nothing parks for nine seconds.
+    static var idrWaitSeconds: Double {
+        get { clamp((defaults.object(forKey: Key.idrWait) as? Double) ?? 2.0, 0.5, 10) }
+        set { defaults.set(clamp(newValue, 0.5, 10), forKey: Key.idrWait) }
+    }
+
+    // MARK: Static detection
+
+    /// 0.15 ... 2 s the picture must be unchanged before the static pad is used.
+    ///
+    /// Shorter reacts sooner but treats the gap between two frames of live video as "static";
+    /// longer is conservative. Only matters while the pad is on.
+    static var staticIdleSeconds: Double {
+        get { clamp((defaults.object(forKey: Key.staticIdle) as? Double) ?? 0.35, 0.15, 2) }
+        set { defaults.set(clamp(newValue, 0.15, 2), forKey: Key.staticIdle) }
+    }
+
+    // MARK: All-intra
+
+    /// Encode every frame as a keyframe.
+    ///
+    /// Roughly doubles the bitrate and removes two whole classes of trouble: a repeat can never
+    /// reference a picture the dash lost, and no pull ever waits for a keyframe. What it costs is
+    /// bandwidth, which is why it is off by default.
+    static var allIntra: Bool {
+        get { defaults.object(forKey: Key.allIntra) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: Key.allIntra) }
+    }
 
     // MARK: Internals
 
@@ -137,7 +181,12 @@ enum CfMotoTuning {
         static let canvasWait = "cfmotoTuningCanvasWait"
         static let canvasOverride = "cfmotoTuningCanvasOverride"
         static let staticPad = "cfmotoTuningStaticPad"
-        static let all = [bitrate, frameRate, keyframe, baseline, canvasWait, canvasOverride, staticPad]
+        static let bufferDepth = "cfmotoTuningBufferDepth"
+        static let idrWait = "cfmotoTuningIDRWait"
+        static let staticIdle = "cfmotoTuningStaticIdle"
+        static let allIntra = "cfmotoTuningAllIntra"
+        static let all = [bitrate, frameRate, keyframe, baseline, canvasWait, canvasOverride, staticPad,
+                          bufferDepth, idrWait, staticIdle, allIntra]
     }
 
     private enum Field { case bitrate, frameRate, keyframe, baseline, canvasWait }

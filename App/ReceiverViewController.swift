@@ -166,6 +166,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoCanvasOverrideField = UITextField()
     private let cfmotoBaselineSwitch = UISwitch()
     private let cfmotoStaticPadSwitch = UISwitch()
+    private let cfmotoBufferDepthField = UITextField()
+    private let cfmotoIDRWaitField = UITextField()
+    private let cfmotoStaticIdleField = UITextField()
+    private let cfmotoAllIntraSwitch = UISwitch()
     private let cfmotoTuningStatus = UILabel()
     private let cfmotoStatus = StatusLabel()
     /// Every EasyConn line in one scrollable, selectable field: a one-line label cannot be read or
@@ -2050,6 +2054,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         cfmotoBaselineSwitch.isEnabled = value
         cfmotoStaticPadSwitch.isEnabled = value
+        cfmotoBufferDepthField.isEnabled = value
+        cfmotoIDRWaitField.isEnabled = value
+        cfmotoStaticIdleField.isEnabled = value
+        cfmotoAllIntraSwitch.isEnabled = value
         carLifeAddressField.isEnabled = value
     }
     @objc private func willResignActive() {
@@ -2338,6 +2346,7 @@ extension ReceiverViewController {
         cfmotoCanvasOverrideField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
         cfmotoBaselineSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         cfmotoStaticPadSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
+        cfmotoAllIntraSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         syncCfMotoTuningFields()
         if let crash = CrashCatcher.previousException() {
             // The previous run died of an exception; that text is the only trace on a sideloaded build.
@@ -2406,6 +2415,10 @@ extension ReceiverViewController {
         CfMotoTuning.canvasOverride = cfmotoCanvasOverrideField.text
         CfMotoTuning.forceBaseline = cfmotoBaselineSwitch.isOn
         CfMotoTuning.staticPadEnabled = cfmotoStaticPadSwitch.isOn
+        if let value = Int(cfmotoBufferDepthField.text ?? "") { CfMotoTuning.bufferDepth = value }
+        if let value = number(cfmotoIDRWaitField) { CfMotoTuning.idrWaitSeconds = value }
+        if let value = number(cfmotoStaticIdleField) { CfMotoTuning.staticIdleSeconds = value }
+        CfMotoTuning.allIntra = cfmotoAllIntraSwitch.isOn
         syncCfMotoTuningFields()
         appendCfMotoLog("画面参数：\(CfMotoTuning.summary)")
         if running, outputMode.isEasyConn { receiver.applyCfMotoTuning() }
@@ -2421,6 +2434,10 @@ extension ReceiverViewController {
         cfmotoCanvasOverrideField.text = CfMotoTuning.canvasOverride ?? ""
         cfmotoBaselineSwitch.isOn = CfMotoTuning.forceBaseline
         cfmotoStaticPadSwitch.isOn = CfMotoTuning.staticPadEnabled
+        cfmotoBufferDepthField.text = "\(CfMotoTuning.bufferDepth)"
+        cfmotoIDRWaitField.text = String(format: "%.1f", CfMotoTuning.idrWaitSeconds)
+        cfmotoStaticIdleField.text = String(format: "%.2f", CfMotoTuning.staticIdleSeconds)
+        cfmotoAllIntraSwitch.isOn = CfMotoTuning.allIntra
         cfmotoTuningStatus.text = CfMotoTuning.isDefault
             ? "当前为默认参数（与生产版 MOTO-HUB 对仪表盘的取值一致）"
             : "当前：\(CfMotoTuning.summary)"
@@ -3163,7 +3180,12 @@ extension ReceiverViewController {
                         "「静止画面用轻量补帧」：车机每秒索要 20 帧，画面不动时会重复同一个关键帧，" +
                         "所以线路速率 = 20 × 关键帧大小（6 Mbps 时约 63 KB → 约 10 Mbps）。开启后静止时改用" +
                         "四分之一码率的小包，带宽降到约三分之一；代价是静止画面（你正在看的地图文字）会变糊。" +
-                        "只在需要省流量或降低车机解码压力时打开。", [
+                        "只在需要省流量或降低车机解码压力时打开。" +
+                        "「缓存深度」：CarPlay 出得比车机快时允许积压几帧。调小延迟低但容易跳帧，调大更顺但延迟增加。" +
+                        "「等关键帧上限」：解码器等关键帧超过这个时间就先发缓存画面顶着，同时向 CarPlay 要一个新的。" +
+                        "「静止判定」：画面要静止多久才算真的静止（只影响轻量补帧）。" +
+                        "「强制全关键帧」：每一帧都当关键帧编码。带宽大约翻倍，但彻底消除撕裂和等关键帧卡顿——" +
+                        "画面撕裂一直存在的话，打开这一项；画面正常就别开。", [
                     .field("码率（Mbps）", cfmotoBitrateField, placeholder: "2.5"),
                     .field("帧率上限", cfmotoFPSField, placeholder: "30"),
                     .field("关键帧间隔（秒）", cfmotoKeyframeField, placeholder: "1.0"),
@@ -3171,6 +3193,10 @@ extension ReceiverViewController {
                     .field("固定画布（留空跟随车机）", cfmotoCanvasOverrideField, placeholder: "1024x512"),
                     .control("强制 Baseline 3.1", cfmotoBaselineSwitch),
                     .control("静止画面用轻量补帧", cfmotoStaticPadSwitch),
+                    .field("缓存深度（帧）", cfmotoBufferDepthField, placeholder: "6"),
+                    .field("等关键帧上限（秒）", cfmotoIDRWaitField, placeholder: "2.0"),
+                    .field("静止判定（秒）", cfmotoStaticIdleField, placeholder: "0.35"),
+                    .control("强制全关键帧", cfmotoAllIntraSwitch),
                     .note(cfmotoTuningStatus),
                     .action("恢复默认参数", icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
                         self?.resetCfMotoTuning()
@@ -3670,6 +3696,9 @@ extension ReceiverViewController: PHPickerViewControllerDelegate {
         }
     }
 }
+
+
+
 
 
 
