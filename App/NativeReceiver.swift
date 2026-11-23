@@ -72,6 +72,8 @@ final class NativeReceiver {
     func setCfMotoTestPattern(_ on: Bool) { cfmoto.setTestPattern(on) }
     /// Rebuild the EasyConn video pipeline after the app was in the background.
     func resynchronizeCfMotoVideo() { cfmoto.resynchronizeVideo() }
+    /// Bitrate / profile overrides changed on the settings page.
+    func applyCfMotoTuning() { cfmoto.applyTuning() }
     /// Full EasyConn log, as shown on screen and served on :10950.
     var cfmotoLogText: String { cfmoto.store.text }
     /// The same log as a file, for the share sheet (works with AirDrop / WeChat / Files).

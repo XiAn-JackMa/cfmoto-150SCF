@@ -158,6 +158,14 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoAddressField = UITextField()
     private let cfmotoPortField = UITextField()
     private let cfmotoTestSwitch = UISwitch()
+    // Manual overrides for the EasyConn video path; see CfMotoTuning for what each one does.
+    private let cfmotoBitrateField = UITextField()
+    private let cfmotoFPSField = UITextField()
+    private let cfmotoKeyframeField = UITextField()
+    private let cfmotoCanvasWaitField = UITextField()
+    private let cfmotoCanvasOverrideField = UITextField()
+    private let cfmotoBaselineSwitch = UISwitch()
+    private let cfmotoTuningStatus = UILabel()
     private let cfmotoStatus = StatusLabel()
     /// Every EasyConn line in one scrollable, selectable field: a one-line label cannot be read or
     /// copied while the link is reconnecting.
@@ -941,6 +949,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             // last session, so the second run is exact even though the first has to guess.
             let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
             var width = 1024, height = 512
+            if let pinned = CfMotoTuning.canvasOverrideSize {
+                // A pinned canvas wins over both the dash and the memory: only the settings page
+                // can be wrong about this, and it is the one the rider asked for.
+                return DisplayPlan(width: pinned.width, height: pinned.height, fps: 30, codec: .h264, iconWidthMM: icon)
+            }
             if let stored = UserDefaults.standard.string(forKey: "cfmotoCanvas") {
                 let parts = stored.split(separator: "x")
                 if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]), w >= 320, h >= 320 {
@@ -1749,7 +1762,15 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                     guard self.pendingCarPlayStart != nil else { return }
                     self.pendingCarPlayStart = nil
                     var live = config; live.port = port
-                    if let canvas = self.receiver.negotiatedCfMotoCanvas {
+                    let pinned = CfMotoTuning.canvasOverrideSize
+                    if let pinned {
+                        live.width = pinned.width; live.height = pinned.height
+                        self.liveDisplay = DisplayPlan(width: pinned.width, height: pinned.height,
+                                                       fps: live.maxFPS, codec: live.videoCodec,
+                                                       iconWidthMM: live.widthPhysicalMM)
+                        self.updateVideoAspect()
+                        self.log("按固定画布 \(pinned.width)×\(pinned.height) 启动 CarPlay")
+                    } else if let canvas = self.receiver.negotiatedCfMotoCanvas {
                         live.width = canvas.width; live.height = canvas.height
                         self.liveDisplay = DisplayPlan(width: canvas.width, height: canvas.height,
                                                        fps: live.maxFPS, codec: live.videoCodec,
@@ -1766,10 +1787,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 if !self.outputMode.isEasyConn || self.receiver.negotiatedCfMotoCanvas != nil {
                     fire()
                 } else {
-                    self.log("等待车机报告画布（最多 \(Int(Self.canvasWaitSeconds)) 秒）后再启动 CarPlay")
+                    let wait = CfMotoTuning.canvasWaitSeconds
+                    self.log("等待车机报告画布（最多 \(Int(wait)) 秒）后再启动 CarPlay")
                     let deadline = DispatchWorkItem { fire() }
                     self.carPlayStartDeadline = deadline
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.canvasWaitSeconds, execute: deadline)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: deadline)
                 }
             }
             // Stamp the request so the first frame can report how long CarPlay took, and warn if it
@@ -1940,6 +1962,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // The deferred start has not fired yet: it adopts the canvas itself, so restarting here
         // would tear down a session that never started.
         guard carPlaySessionStarted, pendingCarPlayStart == nil else { return }
+        // A pinned canvas is what the rider asked for; the dash does not get to change it.
+        guard CfMotoTuning.canvasOverrideSize == nil else { return }
         let size = "\(canvas.width)x\(canvas.height)"
         let current = liveDisplay
         guard current?.width != canvas.width || current?.height != canvas.height else { return }
@@ -2023,6 +2047,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         cfmotoPortField.isEnabled = value
         // Live toggle: it must stay tappable while the link runs, unlike the address fields.
         cfmotoTestSwitch.isEnabled = true
+        for field in [cfmotoBitrateField, cfmotoFPSField, cfmotoKeyframeField, cfmotoCanvasWaitField, cfmotoCanvasOverrideField] {
+            field.isEnabled = value
+        }
+        cfmotoBaselineSwitch.isEnabled = value
         carLifeAddressField.isEnabled = value
     }
     @objc private func willResignActive() {
@@ -2282,6 +2310,16 @@ extension ReceiverViewController {
         cfmotoTestSwitch.addTarget(self, action: #selector(cfmotoTestPatternChanged), for: .valueChanged)
         cfmotoPortField.keyboardType = .numberPad
         cfmotoPortField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
+        for field in [cfmotoBitrateField, cfmotoKeyframeField, cfmotoCanvasWaitField] {
+            field.borderStyle = .none; field.textAlignment = .right; field.keyboardType = .decimalPad
+            field.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
+        }
+        cfmotoFPSField.borderStyle = .none; cfmotoFPSField.textAlignment = .right
+        cfmotoFPSField.keyboardType = .numberPad
+        cfmotoFPSField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
+        cfmotoCanvasOverrideField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
+        cfmotoBaselineSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
+        syncCfMotoTuningFields()
         if let crash = CrashCatcher.previousException() {
             // The previous run died of an exception; that text is the only trace on a sideloaded build.
             log("上次闪退：\(crash)")
@@ -2336,6 +2374,45 @@ extension ReceiverViewController {
         refreshVideoOutputSummary()
     }
     /// The pattern switch applies to a running link, so it must not wait for the next Start.
+
+    /// Reads the six override fields into CfMotoTuning and applies them to a running session.
+    @objc private func cfmotoTuningChanged() {
+        func number(_ field: UITextField) -> Double? {
+            Double((field.text ?? "").replacingOccurrences(of: ",", with: "."))
+        }
+        if let value = number(cfmotoBitrateField) { CfMotoTuning.bitrateMbps = value }
+        if let value = Int(cfmotoFPSField.text ?? "") { CfMotoTuning.frameRate = value }
+        if let value = number(cfmotoKeyframeField) { CfMotoTuning.keyframeSeconds = value }
+        if let value = number(cfmotoCanvasWaitField) { CfMotoTuning.canvasWaitSeconds = value }
+        CfMotoTuning.canvasOverride = cfmotoCanvasOverrideField.text
+        CfMotoTuning.forceBaseline = cfmotoBaselineSwitch.isOn
+        syncCfMotoTuningFields()
+        appendCfMotoLog("画面参数：\(CfMotoTuning.summary)")
+        if running, outputMode.isEasyConn { receiver.applyCfMotoTuning() }
+        reloadVisibleSettings()
+    }
+
+    /// Pushes CfMotoTuning back into the fields, so a clamped or reset value is visible.
+    private func syncCfMotoTuningFields() {
+        cfmotoBitrateField.text = String(format: "%.1f", CfMotoTuning.bitrateMbps)
+        cfmotoFPSField.text = "\(CfMotoTuning.frameRate)"
+        cfmotoKeyframeField.text = String(format: "%.1f", CfMotoTuning.keyframeSeconds)
+        cfmotoCanvasWaitField.text = String(format: "%.0f", CfMotoTuning.canvasWaitSeconds)
+        cfmotoCanvasOverrideField.text = CfMotoTuning.canvasOverride ?? ""
+        cfmotoBaselineSwitch.isOn = CfMotoTuning.forceBaseline
+        cfmotoTuningStatus.text = CfMotoTuning.isDefault
+            ? "当前为默认参数（与生产版 MOTO-HUB 对仪表盘的取值一致）"
+            : "当前：\(CfMotoTuning.summary)"
+    }
+
+    @objc private func resetCfMotoTuning() {
+        CfMotoTuning.reset()
+        syncCfMotoTuningFields()
+        appendCfMotoLog("画面参数已恢复默认：\(CfMotoTuning.summary)")
+        if running, outputMode.isEasyConn { receiver.applyCfMotoTuning() }
+        reloadVisibleSettings()
+    }
+
     @objc private func cfmotoTestPatternChanged() {
         UserDefaults.standard.set(cfmotoTestSwitch.isOn, forKey: "cfmotoTestPattern")
         receiver.setCfMotoTestPattern(cfmotoTestSwitch.isOn)
@@ -3034,6 +3111,21 @@ extension ReceiverViewController {
                     .field("车机 IP 地址", cfmotoAddressField, placeholder: "192.168.0.1"),
                     .field("EasyConn 端口", cfmotoPortField, placeholder: "10930"),
                     .control("测试图案（不接 CarPlay）", cfmotoTestSwitch)
+                ]),
+            SettingsSection("画面参数（手动覆盖）",
+                footer: "码率默认 2.5 Mbps，是生产版 MOTO-HUB 对仪表盘的取值；CarPlay 的地图细节多，" +
+                        "5 GHz 下可以试 4–6 Mbps。关键帧越短，丢帧后恢复越快，也越费流量。" +
+                        "改了立即生效：编码器重建一次，画面会闪一下。固定画布留空表示跟随车机。", [
+                    .field("码率（Mbps）", cfmotoBitrateField, placeholder: "2.5"),
+                    .field("帧率上限", cfmotoFPSField, placeholder: "30"),
+                    .field("关键帧间隔（秒）", cfmotoKeyframeField, placeholder: "1.0"),
+                    .field("启动等待画布（秒）", cfmotoCanvasWaitField, placeholder: "4"),
+                    .field("固定画布（留空跟随车机）", cfmotoCanvasOverrideField, placeholder: "1024x512"),
+                    .control("强制 Baseline 3.1", cfmotoBaselineSwitch),
+                    .note(cfmotoTuningStatus),
+                    .action("恢复默认参数", icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
+                        self?.resetCfMotoTuning()
+                    }
                 ]),
             SettingsSection("连接状态", footer: "日志同时写入 Documents/CarWithin-easyconn.log，崩溃或强退都不会丢。车边测试推荐直接「分享日志文件」，可 AirDrop / 微信 / 存到「文件」。", [
                 .view(cfmotoLogView),

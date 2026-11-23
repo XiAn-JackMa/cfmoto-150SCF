@@ -33,6 +33,9 @@ final class CfMotoOutput {
 
     /// Hard reset of the video pipeline (decoder + queues + keyframe), used when the app returns to
     /// the foreground: the decompression session is what does not survive being backgrounded.
+    /// Re-applies the manual bitrate/profile overrides to the running session.
+    func applyTuning() { source.reloadTuning() }
+
     func resynchronizeVideo() {
         source.resynchronize()
         log("回到前台，已重建视频管线")

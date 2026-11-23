@@ -165,6 +165,32 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         return "CarPlay \(inbound) · \(format) · SPS×\(paramSets) · 解码 \(decodedCount) · 编码 \(encodedCount) · 拉帧 \(pulls) · 送出 \(servedCount) · 重发 \(repeatedCount) · \(drops)"
     }
 
+    /// Applies the manual overrides from the EasyConn page on top of the profile's suggestion.
+    /// A dash profile proposes values tuned for a self-drawn dashboard; a mirrored CarPlay map has
+    /// more detail, so the bitrate is worth raising when the link can carry it.
+    static func tuned(_ parameters: EncoderParameters) -> EncoderParameters {
+        var tuned = parameters
+        tuned.bitrate = CfMotoTuning.bitrate
+        tuned.frameRate = CfMotoTuning.frameRate
+        tuned.keyframeIntervalSeconds = CfMotoTuning.keyframeSeconds
+        tuned.forceBaseline = CfMotoTuning.forceBaseline
+        return tuned
+    }
+
+    /// Rebuilds the encoder after a settings change, so a new bitrate or profile applies to the
+    /// running session instead of waiting for the next one. The next frame is forced to an IDR,
+    /// which is what a rebuilt encoder needs anyway.
+    func reloadTuning() {
+        lock.lock()
+        let old = encoder
+        encoder = nil
+        waitingForIDR = true
+        encoderSettings = CfMotoVideoSource.tuned(encoderSettings)
+        lock.unlock()
+        old?.invalidate()
+        log?("CFMOTO 画面参数已应用：\(CfMotoTuning.summary)（编码器已重建）")
+    }
+
     init(queueCapacity: Int = 3) {
         queue = FrameQueue(capacity: queueCapacity)
         queue.onKeyframeNeeded = { [weak self] in self?.onKeyframeRequest?() }
@@ -176,7 +202,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         lock.lock()
         let previous = self.canvas
         self.canvas = canvas
-        self.encoderSettings = parameters
+        self.encoderSettings = CfMotoVideoSource.tuned(parameters)
         let sizeChanged = previous == nil || previous!.width != canvas.width || previous!.height != canvas.height
         var retired: H264Encoder?
         if sizeChanged {
@@ -587,7 +613,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 // the lock instead of a local variable captured by the escaping closure.
                 encoder = try H264Encoder(width: canvas.width, height: canvas.height,
                                           fps: settings.frameRate, bitrate: settings.bitrate,
-                                          profileLevel: .baseline31) { [weak self] outcome in
+                                          profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .auto) { [weak self] outcome in
                     guard let self else { return }
                     self.lock.lock(); self.encodedResult = outcome; self.lock.unlock()
                 }
@@ -601,7 +627,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             // The dash decodes a clean IDR at least once per second (a real dash runs GOP 1 s), and
             // its pull loop can start mid-stream, so force one instead of waiting for a keyframe that
             // may never come from CarPlay.
-            let stale = now - lastKeyframe >= 1.0
+            let stale = now - lastKeyframe >= max(0.2, encoderSettings.keyframeIntervalSeconds)
             let keyframeWanted = force || lock.withLock { waitingForIDR } || stale
             try encoder.encode(try fitted(image, width: canvas.width, height: canvas.height),
                                presentationTime: CMTime(seconds: now, preferredTimescale: 1_000_000),
