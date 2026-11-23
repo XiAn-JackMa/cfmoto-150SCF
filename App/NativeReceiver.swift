@@ -152,7 +152,9 @@ final class NativeReceiver {
             if let target = configuration.cfmotoAddress {
                 self.cfmoto.onLog = { [weak self] in
                     self?.onCfMotoLog?($0)
-                    self?.log($0)
+                    // Only the EasyConn view. The line is already in the store (CfMotoOutput writes
+                    // it there); routing it through log() as well wrote every line twice, because
+                    // log() mirrors to that same store.
                 }
                 self.cfmoto.onState = { [weak self] in self?.onCfMotoState?($0) }
                 self.cfmoto.onCanvas = { [weak self] in self?.onCfMotoCanvas?($0) }

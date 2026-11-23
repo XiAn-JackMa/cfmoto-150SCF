@@ -328,6 +328,8 @@ final class CfMotoOutput {
         // The cooldown only matters when a link was actually up: NativeReceiver starts by calling
         // stop() as its own cleanup, and counting that would delay every single start by it.
         if current != nil {
+            // The session is over; its canvas must not be read by the next start.
+            lock.lock(); sessionCanvas = nil; lock.unlock()
             lastStopAt = Date()
             log("EasyConn 已停止：已关闭 10920/10921/10922 与探测连接，车机将看到 EOF")
             // stop() can run on the receiver queue; the card is UIKit.
