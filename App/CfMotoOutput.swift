@@ -20,6 +20,10 @@ final class CfMotoOutput {
     var onKeyframeRequest: (() -> Void)?
     /// Raised when the dash negotiates a canvas, so CarPlay can render at that exact size.
     var onCanvas: ((VideoCanvas) -> Void)?
+    /// The canvas this EasyConn session negotiated; nil until the dash reports one. The deferred
+    /// CarPlay start reads it so the first session already renders at the right size.
+    var negotiatedCanvas: VideoCanvas? { lock.withLock { sessionCanvas } }
+    private var sessionCanvas: VideoCanvas?
 
     /// Recreated on every start: shutting a source down closes its frame queue, so reusing the
     /// instance after Stop would leave the next session with a queue nothing can push into.
@@ -110,6 +114,7 @@ final class CfMotoOutput {
         }
         source.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?() }
         lastState = "未启动"
+        lock.lock(); sessionCanvas = nil; lock.unlock()
 
         let signer: PureSwiftHuidSigner
         if let existing = self.signer {
@@ -185,6 +190,7 @@ final class CfMotoOutput {
                     // Remembered for planDisplay(): the next session renders CarPlay 1:1 at the
                     // canvas instead of letterboxing a 16:9 picture into it.
                     UserDefaults.standard.set("\(canvas.width)x\(canvas.height)", forKey: "cfmotoCanvas")
+                    self.lock.lock(); self.sessionCanvas = canvas; self.lock.unlock()
                 // The dash renegotiated its canvas. CarPlay has to be re-rendered at that size,
                 // otherwise every picture is rescaled on the phone and arrives soft.
                 DispatchQueue.main.async { [weak self] in self?.onCanvas?(canvas) }

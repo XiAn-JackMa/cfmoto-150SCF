@@ -66,6 +66,8 @@ final class NativeReceiver {
     var cfmotoDiagnostics: String { cfmoto.diagnostics }
     /// Live resolution / frame-rate readout for the on-screen labels.
     var cfmotoLiveStats: CfMotoLiveStats { cfmoto.liveStats }
+    /// The canvas the current EasyConn session negotiated, nil until the dash reports one.
+    var negotiatedCfMotoCanvas: VideoCanvas? { cfmoto.negotiatedCanvas }
     /// Applies the test pattern to a running link, not only to the next start.
     func setCfMotoTestPattern(_ on: Bool) { cfmoto.setTestPattern(on) }
     /// Rebuild the EasyConn video pipeline after the app was in the background.

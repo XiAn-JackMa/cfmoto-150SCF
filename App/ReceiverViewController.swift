@@ -227,6 +227,21 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var carPlayWatchdog: DispatchWorkItem?
     /// Canvas a restart was already performed for, so a renegotiation cannot loop.
     private var canvasRestartedFor: String?
+    /// CarPlay start held back until the dash reports its canvas; see receiver.onListening.
+    private var pendingCarPlayStart: (() -> Void)?
+    /// True once sameDevice.start() has run for this session; adoptCfMotoCanvas must not restart
+    /// a session that has not begun.
+    private var carPlaySessionStarted = false
+    private var carPlayStartDeadline: DispatchWorkItem?
+    /// How long to wait for the dash canvas before starting CarPlay at the remembered size.
+    private static let canvasWaitSeconds: TimeInterval = 4
+    /// A receiver failure is not fatal on its own: the transport recovers from a momentary overlap
+    /// on the next frame, and tearing the session down on the first one turns a hiccup into a
+    /// dropped ride. Only a streak - this many failures inside this window - is fatal.
+    private var receiverFailures = 0
+    private var receiverFailureStartedAt = Date.distantPast
+    private static let fatalFailureCount = 3
+    private static let failureWindowSeconds: TimeInterval = 15
     private let startupHint = UILabel()
     private var startupHintTask: DispatchWorkItem?
     private var startupHintGeneration = UUID()
@@ -665,6 +680,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                         self.log("CarPlay 首帧已到达")
                     }
                     self.carPlayWatchdog?.cancel(); self.carPlayWatchdog = nil
+                    self.receiverFailures = 0
                     self.clearStartupHint()
                     self.networkStartupTask?.cancel()
                     self.networkStartupTask = nil
@@ -705,7 +721,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         // No output-mode gate: EasyConn is enabled by its address, whatever mode is selected.
         receiver.onCfMotoLog = { [weak self] line in self?.appendCfMotoLog(line) }
-        receiver.onCfMotoCanvas = { [weak self] canvas in self?.adoptCfMotoCanvas(canvas) }
+        receiver.onCfMotoCanvas = { [weak self] canvas in
+            guard let self else { return }
+            // Releases a start that was waiting for exactly this.
+            self.pendingCarPlayStart?()
+            self.adoptCfMotoCanvas(canvas)
+        }
         receiver.onCfMotoState = { [weak self] message in
             // The output raises this from its own queues; the card is UIKit.
             DispatchQueue.main.async {
@@ -757,10 +778,21 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self?.hideFullscreen()
         }
         receiver.onFailure = { [weak self] in
-            // The receiver already logged the reason; make sure it is attached to this session and
-            // stop, so the log does not just end.
-            self?.log("[警告] 接收器失败，已停止 CarPlay（原因见上一条接收器日志）")
-            self?.stop()
+            guard let self else { return }
+            let now = Date()
+            if self.receiverFailures == 0 || now.timeIntervalSince(self.receiverFailureStartedAt) > Self.failureWindowSeconds {
+                self.receiverFailures = 1
+                self.receiverFailureStartedAt = now
+            } else {
+                self.receiverFailures += 1
+            }
+            let fatal = self.receiverFailures >= Self.fatalFailureCount
+            // The receiver already logged the reason; say how many times this has happened and what
+            // this failure did about it, so the log never ends without an explanation. A single
+            // failure is a hiccup the transport recovers from - only a streak is fatal.
+            self.log("[警告] 接收器失败，第 \(self.receiverFailures)/\(Self.fatalFailureCount) 次（原因见上一条接收器日志）" +
+                     (fatal ? "，连续失败，停止 CarPlay" : "，继续尝试"))
+            if fatal { self.stop() }
         }
         bluetooth.onFailure = { [weak self] message in
             self?.stop()
@@ -1706,10 +1738,39 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             localStartupID = startupID
             receiver.onListening = { [weak self] port in
                 guard let self, self.running, self.localStartupID == startupID else { return }
-                self.log("监听器已在端口 \(port) 就绪，开始建立 CarPlay 会话")
-                var live = config; live.port = port
+                self.log("监听器已在端口 \(port) 就绪")
                 self.controlBrowser.start()
-                self.sameDevice.start(configuration: live, identity: identity)
+                // Start CarPlay only once the dash has said what canvas it wants. The bike answers
+                // about 200 ms after the handshake, so waiting costs almost nothing and the very
+                // first session already renders 1:1 - no rescale, no restart.
+                let fire: () -> Void = { [weak self] in
+                    guard let self, self.running, self.localStartupID == startupID else { return }
+                    self.carPlayStartDeadline?.cancel(); self.carPlayStartDeadline = nil
+                    guard self.pendingCarPlayStart != nil else { return }
+                    self.pendingCarPlayStart = nil
+                    var live = config; live.port = port
+                    if let canvas = self.receiver.negotiatedCfMotoCanvas {
+                        live.width = canvas.width; live.height = canvas.height
+                        self.liveDisplay = DisplayPlan(width: canvas.width, height: canvas.height,
+                                                       fps: live.maxFPS, codec: live.videoCodec,
+                                                       iconWidthMM: live.widthPhysicalMM)
+                        self.updateVideoAspect()
+                        self.log("按车机画布 \(canvas.width)×\(canvas.height) 启动 CarPlay（无需缩放）")
+                    } else {
+                        self.log("车机尚未报告画布，按上次记录 \(live.width)×\(live.height) 启动")
+                    }
+                    self.carPlaySessionStarted = true
+                    self.sameDevice.start(configuration: live, identity: identity)
+                }
+                self.pendingCarPlayStart = fire
+                if !self.outputMode.isEasyConn || self.receiver.negotiatedCfMotoCanvas != nil {
+                    fire()
+                } else {
+                    self.log("等待车机报告画布（最多 \(Int(Self.canvasWaitSeconds)) 秒）后再启动 CarPlay")
+                    let deadline = DispatchWorkItem { fire() }
+                    self.carPlayStartDeadline = deadline
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.canvasWaitSeconds, execute: deadline)
+                }
             }
             // Stamp the request so the first frame can report how long CarPlay took, and warn if it
             // never comes: a session that produces no picture is otherwise silent in the log.
@@ -1821,6 +1882,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         localStartupID = nil
         canvasRestartedFor = nil
         stopLiveInfoTimer()
+        pendingCarPlayStart = nil
+        carPlaySessionStarted = false
+        carPlayStartDeadline?.cancel(); carPlayStartDeadline = nil
         networkStartupTask?.cancel()
         networkStartupTask = nil
         waitingForNetwork = false
@@ -1873,6 +1937,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     /// Restarting once at the negotiated size removes the rescale entirely.
     private func adoptCfMotoCanvas(_ canvas: VideoCanvas) {
         guard running, outputMode.isEasyConn else { return }
+        // The deferred start has not fired yet: it adopts the canvas itself, so restarting here
+        // would tear down a session that never started.
+        guard carPlaySessionStarted, pendingCarPlayStart == nil else { return }
         let size = "\(canvas.width)x\(canvas.height)"
         let current = liveDisplay
         guard current?.width != canvas.width || current?.height != canvas.height else { return }
