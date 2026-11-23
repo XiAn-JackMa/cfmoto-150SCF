@@ -250,6 +250,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var receiverFailureStartedAt = Date.distantPast
     private static let fatalFailureCount = 3
     private static let failureWindowSeconds: TimeInterval = 15
+    /// Automatic restarts (canvas change, screen adaptation, struggling link) share one budget: a
+    /// restart that re-triggers itself must not spin for ever.
+    private var autoRestartTimes: [Date] = []
+    private static let autoRestartLimit = 4
+    private static let autoRestartWindow: TimeInterval = 30
     private let startupHint = UILabel()
     private var startupHintTask: DispatchWorkItem?
     private var startupHintGeneration = UUID()
@@ -1728,7 +1733,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 ssid: ssidField.text ?? "", password: password, wifiChannel: channel, audioEnabled: soundOutput != .phone,
                 videoOutputPort: outputPort, secureVideoOutputPort: httpsPort,
                 deviceID: ReceiverConfiguration.persistentDeviceID())
-            if !restartingAutomatically { autoRestarts = 0; lightLevel = 0; reportedScreen = nil; primaryViewer = nil }
+            if !restartingAutomatically {
+                // A user-initiated start begins a new restart budget and forgets the canvas it
+                // already adapted to; an automatic one must keep both, or it loops.
+                autoRestarts = 0; lightLevel = 0; reportedScreen = nil; primaryViewer = nil
+                canvasRestartedFor = nil
+                autoRestartTimes.removeAll()
+            }
             configureDisplay(&config)
             do { try config.validate() } catch {
                 revealSettings(); statusLabel.text = error.localizedDescription; return
@@ -1902,7 +1913,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
 
     private func stop() {
         localStartupID = nil
-        canvasRestartedFor = nil
+        // canvasRestartedFor is NOT cleared here: restartCarPlay calls stop() itself, so
+        // clearing it here defeated the guard and made the restart loop. It is cleared on a
+        // genuine user-initiated start instead.
         stopLiveInfoTimer()
         pendingCarPlayStart = nil
         carPlaySessionStarted = false
@@ -2140,8 +2153,22 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         restartCarPlay(reason: reason, forPerformance: true)
     }
+    /// True when another automatic restart is allowed. Any restart that re-triggers itself hits
+    /// this wall instead of spinning: four in thirty seconds is already pathological.
+    private func reserveAutoRestart(_ reason: String) -> Bool {
+        let now = Date()
+        autoRestartTimes = autoRestartTimes.filter { now.timeIntervalSince($0) <= Self.autoRestartWindow }
+        guard autoRestartTimes.count < Self.autoRestartLimit else {
+            log("[警告] \(Int(Self.autoRestartWindow)) 秒内已自动重启 \(autoRestartTimes.count) 次，放弃本次重启：\(reason)")
+            return false
+        }
+        autoRestartTimes.append(now)
+        return true
+    }
+
     private func restartCarPlay(reason: String, forPerformance: Bool = false) {
         guard running, modeControl.selectedSegmentIndex == 1 else { return }
+        guard reserveAutoRestart(reason) else { return }
         if forPerformance {
             guard autoRestarts < 2 else { return }
             autoRestarts += 1
