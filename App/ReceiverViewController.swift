@@ -3184,7 +3184,7 @@ extension ReceiverViewController {
                         "「静止画面用轻量补帧」：车机每秒索要 20 帧，画面不动时会重复同一个关键帧，" +
                         "所以线路速率 = 20 × 关键帧大小（6 Mbps 时约 63 KB → 约 10 Mbps）。开启后静止时改用" +
                         "四分之一码率的小包，带宽降到约三分之一；代价是静止画面（你正在看的地图文字）会变糊。" +
-                        "只在需要省流量或降低车机解码压力时打开。"
+                        "只在需要省流量或降低车机解码压力时打开。", [
                     .field("码率（Mbps）", cfmotoBitrateField, placeholder: "2.5"),
                     .field("帧率上限", cfmotoFPSField, placeholder: "30"),
                     .field("关键帧间隔（秒）", cfmotoKeyframeField, placeholder: "1.0"),
