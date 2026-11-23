@@ -80,6 +80,23 @@ enum CfMotoTuning {
         set { defaults.set(newValue, forKey: Key.baseline) }
     }
 
+    // MARK: Passthrough
+
+    /// Forward CarPlay's own H.264 to the dash instead of decoding it and encoding it again.
+    ///
+    /// The canvas is 1:1 already, so the picture geometry matches; what is left to check is the
+    /// stream itself - profile, level, B-frames - which only the dash can answer. Off by default
+    /// because turning it on hands the dash a stream we did not shape.
+    ///
+    /// What it buys: no decode, no encode, no second-generation quality loss, and no decoder that
+    /// iOS can revoke on lock or background. What it costs: the bitrate, keyframe interval and
+    /// profile settings stop applying, and a static screen needs CarPlay to have left an IDR behind
+    /// for the repeats this link requires.
+    static var passthroughEnabled: Bool {
+        get { defaults.object(forKey: Key.passthrough) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: Key.passthrough) }
+    }
+
     // MARK: Start-up
 
     /// How long the start waits for the dash to report its canvas before using the remembered size.
@@ -114,10 +131,11 @@ enum CfMotoTuning {
     static var summary: String {
         let extras = canvasOverrideSize.map { " · 固定画布 \($0.width)×\($0.height)" } ?? ""
         let pad = staticPadEnabled ? String(format: " · 静止补帧 %.1f Mbps", staticPadMbps) : ""
+        let mode = passthroughEnabled ? " · 直通（不重新编码）" : ""
         return String(format: "%.1f Mbps · %d fps · 关键帧 %.1f 秒 · %@ · 等待画布 %.0f 秒",
                       bitrateMbps, frameRate, keyframeSeconds,
                       forceBaseline ? "Baseline 3.1" : "自动 profile",
-                      canvasWaitSeconds) + extras + pad
+                      canvasWaitSeconds) + extras + pad + mode
     }
 
     static func reset() {
@@ -137,7 +155,8 @@ enum CfMotoTuning {
         static let canvasWait = "cfmotoTuningCanvasWait"
         static let canvasOverride = "cfmotoTuningCanvasOverride"
         static let staticPad = "cfmotoTuningStaticPad"
-        static let all = [bitrate, frameRate, keyframe, baseline, canvasWait, canvasOverride, staticPad]
+        static let passthrough = "cfmotoTuningPassthrough"
+        static let all = [bitrate, frameRate, keyframe, baseline, canvasWait, canvasOverride, staticPad, passthrough]
     }
 
     private enum Field { case bitrate, frameRate, keyframe, baseline, canvasWait }

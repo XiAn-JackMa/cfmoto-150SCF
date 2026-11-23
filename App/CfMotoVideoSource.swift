@@ -173,6 +173,21 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Cached copy of CfMotoTuning.staticPadEnabled: the pull path runs 20 times a second and a
     /// UserDefaults read per pull is not free. Refreshed whenever the tuning is applied.
     private var staticPadOn = false
+
+    // MARK: Passthrough
+
+    /// Cached copy of CfMotoTuning.passthroughEnabled (read on the pull path).
+    private var passthroughOn = false
+    /// The newest access unit CarPlay produced, waiting for the next pull.
+    private var passthroughAU: Data?
+    private var passthroughAUIsKeyframe = false
+    /// The newest keyframe, kept because a lock-step pull needs a repeatable frame.
+    private var passthroughIDR: Data?
+    /// Latest SPS/PPS in Annex-B form, prepended to a keyframe that does not carry its own.
+    private var passthroughParameters = Data()
+    /// One line describing the stream the dash is being handed; the whole point of the option is
+    /// knowing whether that stream is safe for it.
+    private var loggedCarPlaySPS = false
     /// Cumulative bytes and keyframes handed to the dash, for the average frame size and IDR share.
     private var servedBytes = 0
     private var servedKeyframes = 0
@@ -258,6 +273,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         encoderSettings = CfMotoVideoSource.tuned(encoderSettings)
         let stalePadForTuning = padEncoder
         staticPadOn = CfMotoTuning.staticPadEnabled
+        passthroughOn = CfMotoTuning.passthroughEnabled
         padEncoder = nil; padCanvasKey = ""; padKeyframeAU = nil; padGeneration = -1
         lock.unlock()
         old?.invalidate()
@@ -278,6 +294,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         self.canvas = canvas
         self.encoderSettings = CfMotoVideoSource.tuned(parameters)
         self.staticPadOn = CfMotoTuning.staticPadEnabled
+        self.passthroughOn = CfMotoTuning.passthroughEnabled
         let sizeChanged = previous == nil || previous!.width != canvas.width || previous!.height != canvas.height
         var retired: H264Encoder?
         if sizeChanged {
@@ -307,6 +324,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             lock.lock()
             let stalePad = padEncoder
             padEncoder = nil; padCanvasKey = ""; padKeyframeAU = nil; padGeneration = -1
+            passthroughAU = nil; passthroughIDR = nil; passthroughParameters = Data()
             lock.unlock()
             stalePad?.invalidate()
             queue.invalidateKeyframe()
@@ -435,6 +453,82 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     }
 
     /// Asks CarPlay for a keyframe when the request can actually be answered, at most once a second.
+    // MARK: - Passthrough
+
+    /// One line per session describing the stream the dash is being handed. The whole reason the
+    /// option exists is to find out whether that stream is safe for this dash, so it says so.
+    private func logCarPlayStreamOnce(_ data: Data) {
+        guard !loggedCarPlaySPS, let info = H264SPS.parse(accessUnit: data) else { return }
+        loggedCarPlaySPS = true
+        var text = "CarPlay 原始流：\(info.summary)"
+        if info.levelIdc > 41 { text += " ← level 偏高，老车机解码器可能不接受" }
+        if let reorder = info.maxNumReorderFrames, reorder > 0 { text += " ← 含 B 帧重排，车机需支持" }
+        log?(text)
+    }
+
+    /// Stores the access unit for the next pull: no decode, no encode, no second-generation loss.
+    private func acceptPassthrough(_ data: Data, keyframe: Bool) {
+        // Keep any parameter sets that arrive with this unit, so a keyframe sent without them is
+        // still decodable on the dash.
+        var sets = Data()
+        if let units = try? AnnexB.units(in: data) {
+            for unit in units {
+                guard let header = unit.first else { continue }
+                let type = Int(header & 0x1F)
+                if type == 7 || type == 8 {
+                    sets.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                    sets.append(unit)
+                }
+            }
+        }
+        lock.lock()
+        if !sets.isEmpty { passthroughParameters = sets }
+        var forward = data
+        if keyframe, sets.isEmpty, !passthroughParameters.isEmpty {
+            var combined = passthroughParameters
+            combined.append(data)
+            forward = combined
+        }
+        passthroughAU = forward
+        passthroughAUIsKeyframe = keyframe
+        if keyframe { passthroughIDR = forward }
+        lock.unlock()
+    }
+
+    /// One pull answered from what CarPlay sent. Returns nil only before the first picture.
+    private func servePassthrough(waiting: Bool, since: Date) -> EncodedFrame? {
+        lock.lock()
+        let fresh = passthroughAU
+        let freshIsKeyframe = passthroughAUIsKeyframe
+        let idr = passthroughIDR
+        passthroughAU = nil
+        if let fresh {
+            servedCount += 1
+            noteServed(fresh.count, keyframe: freshIsKeyframe)
+        } else if let idr {
+            // No new picture: the link still wants an answer, and only a keyframe may be repeated.
+            servedCount += 1; repeatedCount += 1
+            noteServed(idr.count, keyframe: true)
+        }
+        sequence &+= 1
+        let seq = sequence
+        lock.unlock()
+        if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter { requestKeyframeIfUseful() }
+        if let fresh {
+            return EncodedFrame(accessUnit: fresh, isKeyframe: freshIsKeyframe,
+                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
+        }
+        if let idr {
+            return EncodedFrame(accessUnit: idr, isKeyframe: true,
+                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
+        }
+        // Nothing has ever arrived: ask for a keyframe and let this pull miss. The dash tolerates
+        // that for nine seconds, which is long enough for the first picture to arrive.
+        requestKeyframeIfUseful()
+        diagnose("直通模式：还没有可发送的画面，已请求关键帧")
+        return nil
+    }
+
     private func requestKeyframeIfUseful() {
         let now = Date()
         lock.lock()
@@ -507,6 +601,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         let waiting = decoderNeedsKeyframe
         let since = decoderWaitingSince
         lock.unlock()
+
+        if passthroughOn { return servePassthrough(waiting: waiting, since: since) }
 
         // One pull, one encode of the picture in hand: the dash is lock-step, so a queue in between
         // only adds staleness and overflow. Nothing to encode yet means CarPlay has not produced a
@@ -618,6 +714,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         let oldEncoder = encoder; encoder = nil
         let oldPad = padEncoder; padEncoder = nil
         padEncodedResult = nil; padKeyframeAU = nil; padGeneration = -1
+        passthroughAU = nil; passthroughIDR = nil; passthroughParameters = Data()
         lock.unlock()
         // Invalidate OUTSIDE the lock. VTCompressionSessionInvalidate waits for the in-flight frame,
         // and the callback that finishes it stores the result under this same lock - so invalidating
@@ -640,6 +737,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             return
         }
         lock.lock(); inbound += 1; lastInboundAt = Date(); lock.unlock()
+        logCarPlayStreamOnce(data)
+        if lock.withLock({ passthroughOn }) {
+            acceptPassthrough(data, keyframe: keyframe)
+            return
+        }
         lock.lock()
         let reject = stopped || pending >= 6
         if reject { skipping = !skipping }
