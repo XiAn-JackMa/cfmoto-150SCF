@@ -602,28 +602,21 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         inlineVideoContainer.layer.cornerCurve = .continuous
         videoSurface.translatesAutoresizingMaskIntoConstraints = false
         restoreInlineVideoSurface()
-        // Readout drawn on top of the picture itself; it stays out of the way in the corner.
-        previewInfoLabel.font = .monospacedSystemFont(ofSize: 12, weight: .semibold)
-        previewInfoLabel.textColor = .white
-        previewInfoLabel.backgroundColor = UIColor.black.withAlphaComponent(0.45)
-        previewInfoLabel.layer.cornerRadius = 6
-        previewInfoLabel.layer.cornerCurve = .continuous
-        previewInfoLabel.clipsToBounds = true
-        previewInfoLabel.numberOfLines = 2
-        previewInfoLabel.textAlignment = .center
-        previewInfoLabel.translatesAutoresizingMaskIntoConstraints = false
-        previewInfoLabel.isHidden = true
-        inlineVideoContainer.addSubview(previewInfoLabel)
-        NSLayoutConstraint.activate([
-            previewInfoLabel.leadingAnchor.constraint(equalTo: inlineVideoContainer.leadingAnchor, constant: 10),
-            previewInfoLabel.topAnchor.constraint(equalTo: inlineVideoContainer.topAnchor, constant: 10),
-            previewInfoLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 150)
-        ])
         videoHeight = inlineVideoContainer.heightAnchor.constraint(equalTo: inlineVideoContainer.widthAnchor,
                                                                     multiplier: displayAspectHeight)
         videoHeight.priority = .defaultLow
         videoHeight.isActive = true
+        // Source-side readout, directly under the picture rather than on top of it: what CarPlay
+        // produces, so it can be compared at a glance with the line under the button, which is
+        // what the dash actually receives.
+        previewInfoLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        previewInfoLabel.textColor = .secondaryLabel
+        previewInfoLabel.numberOfLines = 0
+        previewInfoLabel.textAlignment = .center
+        previewInfoLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        previewInfoLabel.isHidden = true
         stack.addArrangedSubview(inlineVideoContainer)
+        stack.addArrangedSubview(previewInfoLabel)
         videoActions.addArrangedSubview(fullscreenButton)
         videoActions.addArrangedSubview(pictureInPictureButton)
         videoActions.axis = .horizontal; videoActions.distribution = .fillEqually; videoActions.spacing = 10
@@ -1042,23 +1035,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let plan = running ? (liveDisplay ?? planDisplay(for: targetScreen)) : planDisplay(for: targetScreen)
         let width = plan.width, height = plan.height
         videoHeight.isActive = false
-        // Readout drawn on top of the picture itself; it stays out of the way in the corner.
-        previewInfoLabel.font = .monospacedSystemFont(ofSize: 12, weight: .semibold)
-        previewInfoLabel.textColor = .white
-        previewInfoLabel.backgroundColor = UIColor.black.withAlphaComponent(0.45)
-        previewInfoLabel.layer.cornerRadius = 6
-        previewInfoLabel.layer.cornerCurve = .continuous
-        previewInfoLabel.clipsToBounds = true
-        previewInfoLabel.numberOfLines = 2
-        previewInfoLabel.textAlignment = .center
-        previewInfoLabel.translatesAutoresizingMaskIntoConstraints = false
-        previewInfoLabel.isHidden = true
-        inlineVideoContainer.addSubview(previewInfoLabel)
-        NSLayoutConstraint.activate([
-            previewInfoLabel.leadingAnchor.constraint(equalTo: inlineVideoContainer.leadingAnchor, constant: 10),
-            previewInfoLabel.topAnchor.constraint(equalTo: inlineVideoContainer.topAnchor, constant: 10),
-            previewInfoLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 150)
-        ])
         videoHeight = inlineVideoContainer.heightAnchor.constraint(equalTo: inlineVideoContainer.widthAnchor,
                                                            multiplier: CGFloat(height) / CGFloat(width))
         videoHeight.priority = .defaultLow
@@ -1238,13 +1214,16 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         let s = receiver.cfmotoLiveStats
         outputInfoLabel.text = [
-            String(format: "输出 %@ · %.1f fps · %.1f Mbps", s.canvasSize, s.servedFPS, s.bitrateMbps),
+            String(format: "车机 %@ · %.1f fps · %.1f Mbps", s.canvasSize, s.servedFPS, s.bitrateMbps),
             "CarPlay \(s.carPlaySize) · \(s.scaleText == "1:1" ? "不缩放" : "缩放 \(s.scaleText)")",
             "重复画面 \(Int(s.paddedRatio * 100))% · 关键帧 \(Int(s.keyframeRatio * 100))% · 每帧 \(String(format: "%.1f", s.averageFrameKB)) KB"
         ].joined(separator: "\n")
         outputInfoLabel.isHidden = false
-        previewInfoLabel.text = String(format: "车机 %@ · %.1f fps · %.1f Mbps · %@",
-                                       s.canvasSize, s.servedFPS, s.bitrateMbps, s.scaleText)
+        // What CarPlay produces, as opposed to what the dash receives (the line under the button).
+        // A gap between the two rates is the dash pulling faster than CarPlay delivers, which is
+        // answered from the cache rather than with new pictures.
+        previewInfoLabel.text = String(format: "CarPlay %@ · %.1f fps · %.1f Mbps · %@",
+                                       s.carPlaySize, s.sourceFPS, s.sourceMbps, s.scaleText)
         previewInfoLabel.isHidden = !displayedVideo
     }
 
@@ -3691,3 +3670,6 @@ extension ReceiverViewController: PHPickerViewControllerDelegate {
         }
     }
 }
+
+
+

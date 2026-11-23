@@ -23,6 +23,12 @@ struct CfMotoLiveStats {
     var scaleText = "—"
     /// Frames handed to the dash over the last two seconds, divided by two.
     var servedFPS: Double = 0
+    /// Pictures CarPlay delivered over the last two seconds, divided by two. Compare with
+    /// servedFPS: a gap means the dash is pulling faster than CarPlay produces, and the difference
+    /// is answered from the cache.
+    var sourceFPS: Double = 0
+    /// Mbit/s CarPlay itself produced over the last two seconds.
+    var sourceMbps: Double = 0
     /// Mbit/s actually put on the wire over the last two seconds.
     var bitrateMbps: Double = 0
     /// Share of served frames that were re-sent from the cache.
@@ -142,6 +148,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// the bitrate shown on screen has to be what is actually being sent now, not since the session
     /// started, which is what the cumulative counters would give.
     private var servedWindow: [(at: TimeInterval, bytes: Int)] = []
+    /// Arrival times of pictures from CarPlay, for the source-side readout.
+    private var sourceWindow: [(at: TimeInterval, bytes: Int)] = []
 
     /// A second encoder that compresses the still picture at a low bitrate, used to answer idle
     /// pulls when that is enabled. Separate from the main encoder so its rate control is never
@@ -439,6 +447,34 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         }
     }
 
+    /// Appends one arrival to the source-side window. Call with the lock held.
+    private func noteSourceLocked(bytes: Int) {
+        let now = ProcessInfo.processInfo.systemUptime
+        sourceWindow.append((now, bytes))
+        while let first = sourceWindow.first, now - first.at > 3 { sourceWindow.removeFirst() }
+    }
+
+    /// True when the access unit carries a coded picture rather than only parameter sets. Used to
+    /// report what CarPlay actually produces, which is the number the wire rate has to be compared
+    /// against when the dash looks slow.
+    private func carriesPicture(_ data: Data) -> Bool {
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return false }
+            let count = raw.count
+            var index = 0
+            while index + 3 < count {
+                if base[index] == 0, base[index + 1] == 0, base[index + 2] == 1 {
+                    let type = base[index + 3] & 0x1F
+                    if type == 1 || type == 5 { return true }
+                    index += 3
+                } else {
+                    index += 1
+                }
+            }
+            return false
+        }
+    }
+
     /// Reports CarPlay's own stream parameters once per session.
     private func logCarPlayStreamOnce(_ data: Data) {
         guard !loggedCarPlaySPS, let info = H264SPS.parse(accessUnit: data) else { return }
@@ -654,7 +690,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             lock.lock(); nonH264 += 1; lock.unlock()
             return
         }
-        lock.lock(); inbound += 1; lastInboundAt = Date(); lock.unlock()
+        let isPicture = carriesPicture(data)
+        lock.lock()
+        inbound += 1
+        lastInboundAt = Date()
+        if isPicture { noteSourceLocked(bytes: data.count) }
+        lock.unlock()
         logCarPlayStreamOnce(data)
         lock.lock()
         let reject = stopped || pending >= 6
@@ -731,6 +772,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // Bits actually put on the wire over the last two seconds, not the session average: the
         // point of showing it is to compare against the configured cap right now.
         let bytesPerSecond = Double(recent.reduce(0) { $0 + $1.bytes }) / window
+        let recentSource = sourceWindow.filter { now - $0.at <= window }
+        let sourceFPS = Double(recentSource.count) / window
+        let sourceMbps = Double(recentSource.reduce(0) { $0 + $1.bytes }) / window * 8 / 1_000_000
         let canvasText = canvas.map { "\($0.width)×\($0.height)" } ?? "—"
         let sourceText = sourceWidth > 0 ? "\(sourceWidth)×\(sourceHeight)" : "—"
         var scaleText = "—"
@@ -743,6 +787,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         return CfMotoLiveStats(
             carPlaySize: sourceText, canvasSize: canvasText, scaleText: scaleText,
             servedFPS: fps,
+            sourceFPS: sourceFPS, sourceMbps: sourceMbps,
             bitrateMbps: bytesPerSecond * 8 / 1_000_000,
             paddedRatio: servedCount > 0 ? Double(repeatedCount) / Double(servedCount) : 0,
             keyframeRatio: servedCount > 0 ? Double(servedKeyframes) / Double(servedCount) : 0,
