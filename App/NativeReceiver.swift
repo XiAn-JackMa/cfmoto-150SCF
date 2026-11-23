@@ -64,6 +64,8 @@ final class NativeReceiver {
     var onCfMotoCanvas: ((VideoCanvas) -> Void)?
     /// Snapshot for the settings screen's copy button.
     var cfmotoDiagnostics: String { cfmoto.diagnostics }
+    /// Live resolution / frame-rate readout for the on-screen labels.
+    var cfmotoLiveStats: CfMotoLiveStats { cfmoto.liveStats }
     /// Applies the test pattern to a running link, not only to the next start.
     func setCfMotoTestPattern(_ on: Bool) { cfmoto.setTestPattern(on) }
     /// Rebuild the EasyConn video pipeline after the app was in the background.

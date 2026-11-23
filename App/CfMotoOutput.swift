@@ -214,6 +214,7 @@ final class CfMotoOutput {
                 }
                 // Always log the counters: replacing them with a warning hid the one thing needed to
                 // tell a CarPlay problem from an EasyConn one.
+                self.logDiagnosticIfDue()
                 let idle = self.source.inboundIdle
                 if idle > 5 {
                     self.log("[管道] \(self.source.counters)")
@@ -238,6 +239,9 @@ final class CfMotoOutput {
     }
 
     /// Everything needed to diagnose a stalled link, for the settings screen's copy button.
+    /// Live snapshot for the readouts on the home screen and above the preview.
+    var liveStats: CfMotoLiveStats { source.liveStats }
+
     var diagnostics: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
@@ -263,6 +267,24 @@ final class CfMotoOutput {
     /// Last silence length that was already reported, so the log gets one line per change of scale
     /// rather than one per tick.
     private var lastSilenceSeconds = 0
+
+    private var lastDiagnosticAt = Date.distantPast
+
+    /// One line every ten seconds with everything needed to explain a soft or stuttering picture:
+    /// the pair of resolutions (a mismatch means every frame is rescaled), the rate the dash is
+    /// actually served at, and how much of it is padding.
+    private func logDiagnosticIfDue() {
+        guard Date().timeIntervalSince(lastDiagnosticAt) >= 10 else { return }
+        lastDiagnosticAt = Date()
+        let s = source.liveStats
+        var text = "[诊断] CarPlay \(s.carPlaySize) → 画布 \(s.canvasSize) · 缩放 \(s.scaleText)" +
+            String(format: " · 发出 %.1f fps · 补帧 %.0f%% · 关键帧 %.0f%% · 平均 %.1f KB",
+                   s.servedFPS, s.paddedRatio * 100, s.keyframeRatio * 100, s.averageFrameKB)
+        if s.scaleText != "1:1", s.scaleText != "—" {
+            text += " ← 尺寸不一致，每帧都在重采样"
+        }
+        log(text)
+    }
 
     /// Reports a CarPlay silence once, naming the component at fault.
     private func noteCarPlaySilence(_ idle: TimeInterval) {

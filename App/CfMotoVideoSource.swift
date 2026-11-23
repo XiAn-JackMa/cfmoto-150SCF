@@ -8,9 +8,33 @@
 // (the dash pulls with REQ_RV_DATA_NEXT) instead of on a fixed timer.
 
 import AVFoundation
+
+
 import CoreImage
 import Foundation
 import VideoToolbox
+
+struct CfMotoLiveStats {
+    /// Size of the picture CarPlay produced.
+    var carPlaySize = "—"
+    /// Size of the canvas the dash negotiated, which is what we encode into.
+    var canvasSize = "—"
+    /// "1:1" when no rescaling happens, otherwise the factor applied before encoding.
+    var scaleText = "—"
+    /// Frames handed to the dash over the last two seconds, divided by two.
+    var servedFPS: Double = 0
+    /// Share of served frames that were re-sent from the cache.
+    var paddedRatio: Double = 0
+    /// Share of served frames that were keyframes.
+    var keyframeRatio: Double = 0
+    var averageFrameKB: Double = 0
+    var counters = ""
+
+    /// "1024×512 · 19.8 fps · 1:1" - the one line both readouts show.
+    var summary: String {
+        String(format: "%@ · %.1f fps · 缩放 %@", canvasSize, servedFPS, scaleText)
+    }
+}
 
 final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private let queue: FrameQueue
@@ -98,6 +122,15 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var decodeErrors = 0
     /// Idle pulls answered by re-encoding the last picture.
     private var repeatedCount = 0
+    /// Rolling window used for the live frame rate shown on screen.
+    private var servedTimes: [TimeInterval] = []
+    /// Cumulative bytes and keyframes handed to the dash, for the average frame size and IDR share.
+    private var servedBytes = 0
+    private var servedKeyframes = 0
+    /// Size of the picture CarPlay actually produced, and of the canvas we encode into: the pair
+    /// that decides whether `fitted()` scales (blurring the dash text) or passes the picture through.
+    private var sourceWidth = 0
+    private var sourceHeight = 0
     /// `parameters` is mutated on the work queue; this flag is the lock-protected view of it.
     private var parametersReady = false
     /// Throttles per-frame diagnostics so a stalled pipeline says why once, not 30 times a second.
@@ -121,6 +154,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     var counters: String {
         lock.lock(); defer { lock.unlock() }
+        return countersLocked()
+    }
+
+    /// Same string, for callers that already hold the lock.
+    private func countersLocked() -> String {
         let format = nonH264 > 0 ? "H.265×\(nonH264)" : (parametersReady ? "H.264 就绪" : "H.264 等 SPS")
         let drops = "丢弃[等IDR \(dropWaitingIDR)/冷却 \(dropCooldown)/无解码器 \(dropNoDecoder)/空帧 \(dropNoPicture)/无回调 \(dropNoCallback)/异常 \(decodeErrors)]" +
             " · 参数集 \(parameterSetOnly)"
@@ -223,6 +261,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             // the dash should see; re-encoding identical content risks a byte-identical P-frame.
             lock.lock()
             servedCount += 1; repeatedCount += 1
+            noteServed(keyframe.count, keyframe: true)
             sequence &+= 1
             let seq = sequence
             lock.unlock()
@@ -243,6 +282,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 encodedCount += 1
                 pictureDirty = false
                 lastServedWasKeyframe = frame.isKeyframe
+                noteServed(frame.data.count, keyframe: frame.isKeyframe)
                 sequence &+= 1
                 let seq = sequence
                 lock.unlock()
@@ -260,6 +300,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             if prepared != nil { diagnose("编码不可用，暂用旧关键帧补帧") }
             lock.lock()
             servedCount += 1; repeatedCount += 1
+            noteServed(keyframe.count, keyframe: true)
             sequence &+= 1
             let seq = sequence
             lock.unlock()
@@ -269,6 +310,16 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
         diagnose("无任何可发画面（CarPlay 尚未产出），本次拉帧回空")
         return nil
+    }
+
+
+    /// Caller holds `lock`. Feeds the rolling window used by the live readout and by diagnostics.
+    private func noteServed(_ bytes: Int, keyframe: Bool) {
+        let now = ProcessInfo.processInfo.systemUptime
+        servedTimes.append(now)
+        if servedTimes.count > 512 { servedTimes.removeFirst(servedTimes.count - 512) }
+        servedBytes += bytes
+        if keyframe { servedKeyframes += 1 }
     }
 
     private func nextSequence() -> UInt64 {
@@ -330,6 +381,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
         guard let image = decode(data, keyframe: keyframe) else { return }
         lock.lock(); decodedCount += 1; lock.unlock()
+        noteSourceSize(CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image), canvas: canvas)
         guard let prepared = try? fitted(image, width: canvas.width, height: canvas.height) else {
             diagnose("letterbox failed")
             return
@@ -341,6 +393,57 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // which left the queue empty and gated essentially always (measured: 100% of pulls were
         // padded, not one queued frame ever served).
         lock.lock(); fittedBuffer = prepared; pictureDirty = true; lock.unlock()
+    }
+
+
+    /// Records the size CarPlay actually produced and reports the scale factor once per change.
+    /// A 1:1 match is what makes `fitted()` a pass-through; anything else resamples every frame and
+    /// softens the dash text, so it has to be visible in the log.
+    private func noteSourceSize(_ width: Int, _ height: Int, canvas: VideoCanvas) {
+        lock.lock()
+        let changed = width != sourceWidth || height != sourceHeight
+        sourceWidth = width; sourceHeight = height
+        lock.unlock()
+        guard changed else { return }
+        let scaleX = Double(canvas.width) / Double(max(width, 1))
+        let scaleY = Double(canvas.height) / Double(max(height, 1))
+        let factor = min(scaleX, scaleY)
+        let verdict: String
+        if abs(scaleX - 1) < 0.01 && abs(scaleY - 1) < 0.01 {
+            verdict = "1:1，不再缩放"
+        } else if factor > 1.01 {
+            verdict = String(format: "放大 %.2f×（画面会变糊）", factor)
+        } else if factor < 0.99 {
+            verdict = String(format: "缩小 %.2f×", factor)
+        } else {
+            verdict = "比例不一致，留黑边"
+        }
+        log?("CFMOTO CarPlay 画面 \(width)x\(height) → 画布 \(canvas.width)x\(canvas.height) · \(verdict)")
+    }
+
+    /// Everything the UI and the periodic diagnostic line need, read under one lock.
+    var liveStats: CfMotoLiveStats {
+        lock.lock(); defer { lock.unlock() }
+        let now = ProcessInfo.processInfo.systemUptime
+        let window: TimeInterval = 2.0
+        let recent = servedTimes.filter { now - $0 <= window }.count
+        let fps = Double(recent) / window
+        let canvasText = canvas.map { "\($0.width)×\($0.height)" } ?? "—"
+        let sourceText = sourceWidth > 0 ? "\(sourceWidth)×\(sourceHeight)" : "—"
+        var scaleText = "—"
+        if let canvas, sourceWidth > 0, sourceHeight > 0 {
+            let sx = Double(canvas.width) / Double(sourceWidth)
+            let sy = Double(canvas.height) / Double(sourceHeight)
+            if abs(sx - 1) < 0.01 && abs(sy - 1) < 0.01 { scaleText = "1:1" }
+            else { scaleText = String(format: "%.2f×", min(sx, sy)) }
+        }
+        return CfMotoLiveStats(
+            carPlaySize: sourceText, canvasSize: canvasText, scaleText: scaleText,
+            servedFPS: fps,
+            paddedRatio: servedCount > 0 ? Double(repeatedCount) / Double(servedCount) : 0,
+            keyframeRatio: servedCount > 0 ? Double(servedKeyframes) / Double(servedCount) : 0,
+            averageFrameKB: servedCount > 0 ? Double(servedBytes) / Double(servedCount) / 1024 : 0,
+            counters: countersLocked())
     }
 
     // MARK: - Decode

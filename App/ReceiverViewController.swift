@@ -214,6 +214,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let bluetoothSetupSwitch = UISwitch()
     private var needsNetworkDetails: Bool { modeControl.selectedSegmentIndex != 0 || bluetoothSetupSwitch.isOn }
     private let startButton = UIButton(type: .system)
+    /// "1024×512 · 19.8 fps · 缩放 1:1" under the start button.
+    private let outputInfoLabel = UILabel()
+    /// The same readout drawn over the preview, so the dash size is visible while watching.
+    private let previewInfoLabel = UILabel()
+    private var liveInfoTimer: Timer?
     private let heading = UILabel()
     private let explanation = UILabel()
     private let statusLabel = UILabel()
@@ -422,6 +427,15 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         startButton.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24)
         heroStack.addArrangedSubview(startButton)
 
+        // Live output readout directly under the start button: resolution, rate and whether the
+        // picture is being rescaled - the three things that explain a soft or stuttering dash.
+        outputInfoLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        outputInfoLabel.textColor = .secondaryLabel
+        outputInfoLabel.numberOfLines = 2
+        outputInfoLabel.textAlignment = .center
+        outputInfoLabel.isHidden = true
+        heroStack.addArrangedSubview(outputInfoLabel)
+
         let browserIcon = UIImageView(image: UIImage(systemName: "globe"))
         browserIcon.tintColor = .systemGreen; browserIcon.contentMode = .scaleAspectFit
         browserIcon.widthAnchor.constraint(equalToConstant: 22).isActive = true
@@ -557,6 +571,23 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         inlineVideoContainer.layer.cornerCurve = .continuous
         videoSurface.translatesAutoresizingMaskIntoConstraints = false
         restoreInlineVideoSurface()
+        // Readout drawn on top of the picture itself; it stays out of the way in the corner.
+        previewInfoLabel.font = .monospacedSystemFont(ofSize: 12, weight: .semibold)
+        previewInfoLabel.textColor = .white
+        previewInfoLabel.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        previewInfoLabel.layer.cornerRadius = 6
+        previewInfoLabel.layer.cornerCurve = .continuous
+        previewInfoLabel.clipsToBounds = true
+        previewInfoLabel.numberOfLines = 2
+        previewInfoLabel.textAlignment = .center
+        previewInfoLabel.translatesAutoresizingMaskIntoConstraints = false
+        previewInfoLabel.isHidden = true
+        inlineVideoContainer.addSubview(previewInfoLabel)
+        NSLayoutConstraint.activate([
+            previewInfoLabel.leadingAnchor.constraint(equalTo: inlineVideoContainer.leadingAnchor, constant: 10),
+            previewInfoLabel.topAnchor.constraint(equalTo: inlineVideoContainer.topAnchor, constant: 10),
+            previewInfoLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 150)
+        ])
         videoHeight = inlineVideoContainer.heightAnchor.constraint(equalTo: inlineVideoContainer.widthAnchor,
                                                                     multiplier: displayAspectHeight)
         videoHeight.priority = .defaultLow
@@ -699,6 +730,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self.startAirPlayTransport()
         }
         receiver.onVideoOutputState = { [weak self] message in
+            self?.log("[视频输出] \(message)")
             self?.portStatus.text = message
             self?.browserViewersLabel.text = message
             if let self, self.outputMode == .airPlay, self.running, !self.airPlayReady { self.updateAirPlayStatus(message) }
@@ -724,7 +756,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         pictureInPicture.onRestore = { [weak self] in
             self?.hideFullscreen()
         }
-        receiver.onFailure = { [weak self] in self?.stop() }
+        receiver.onFailure = { [weak self] in
+            // The receiver already logged the reason; make sure it is attached to this session and
+            // stop, so the log does not just end.
+            self?.log("[警告] 接收器失败，已停止 CarPlay（原因见上一条接收器日志）")
+            self?.stop()
+        }
         bluetooth.onFailure = { [weak self] message in
             self?.stop()
             self?.statusLabel.text = message
@@ -952,6 +989,23 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let plan = running ? (liveDisplay ?? planDisplay(for: targetScreen)) : planDisplay(for: targetScreen)
         let width = plan.width, height = plan.height
         videoHeight.isActive = false
+        // Readout drawn on top of the picture itself; it stays out of the way in the corner.
+        previewInfoLabel.font = .monospacedSystemFont(ofSize: 12, weight: .semibold)
+        previewInfoLabel.textColor = .white
+        previewInfoLabel.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        previewInfoLabel.layer.cornerRadius = 6
+        previewInfoLabel.layer.cornerCurve = .continuous
+        previewInfoLabel.clipsToBounds = true
+        previewInfoLabel.numberOfLines = 2
+        previewInfoLabel.textAlignment = .center
+        previewInfoLabel.translatesAutoresizingMaskIntoConstraints = false
+        previewInfoLabel.isHidden = true
+        inlineVideoContainer.addSubview(previewInfoLabel)
+        NSLayoutConstraint.activate([
+            previewInfoLabel.leadingAnchor.constraint(equalTo: inlineVideoContainer.leadingAnchor, constant: 10),
+            previewInfoLabel.topAnchor.constraint(equalTo: inlineVideoContainer.topAnchor, constant: 10),
+            previewInfoLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 150)
+        ])
         videoHeight = inlineVideoContainer.heightAnchor.constraint(equalTo: inlineVideoContainer.widthAnchor,
                                                            multiplier: CGFloat(height) / CGFloat(width))
         videoHeight.priority = .defaultLow
@@ -1101,6 +1155,41 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         browserCopyButton.isEnabled = browserURL != nil
         secureBrowserURLLabel.text = secureBrowserURL ?? (browserPortError == nil ? "未连接 Wi-Fi" : "请检查 HTTPS 端口")
         secureBrowserCopyButton.isEnabled = secureBrowserURL != nil
+    }
+
+
+    /// Two readouts from one snapshot: under the start button and over the preview. Both name the
+    /// dash canvas, the rate actually served and - crucially - whether the picture is rescaled.
+    /// A factor other than 1:1 is what makes the dash look soft, so it is shown, not just logged.
+    private func startLiveInfoTimer() {
+        liveInfoTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.updateLiveInfo()
+        }
+        timer.tolerance = 0.1
+        liveInfoTimer = timer
+        updateLiveInfo()
+    }
+
+    private func stopLiveInfoTimer() {
+        liveInfoTimer?.invalidate(); liveInfoTimer = nil
+        outputInfoLabel.isHidden = true
+        previewInfoLabel.isHidden = true
+    }
+
+    private func updateLiveInfo() {
+        guard running, outputMode.isEasyConn else {
+            outputInfoLabel.isHidden = true
+            previewInfoLabel.isHidden = true
+            return
+        }
+        let s = receiver.cfmotoLiveStats
+        let fps = String(format: "%.1f", s.servedFPS)
+        outputInfoLabel.text = "输出 \(s.canvasSize) · \(fps) fps" + "\n" +
+            "CarPlay \(s.carPlaySize) · 缩放 \(s.scaleText) · 补帧 \(Int(s.paddedRatio * 100))% · 关键帧 \(Int(s.keyframeRatio * 100))%"
+        outputInfoLabel.isHidden = false
+        previewInfoLabel.text = "车机 \(s.canvasSize) · \(fps) fps · \(s.scaleText)"
+        previewInfoLabel.isHidden = !displayedVideo
     }
 
     private func refreshVideoOutputSummary() {
@@ -1355,6 +1444,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             videoSurface.bottomAnchor.constraint(equalTo: inlineVideoContainer.bottomAnchor)
         ]
         NSLayoutConstraint.activate(inlineVideoConstraints)
+        // The surface is re-added on every restore; keep the readout above it.
+        inlineVideoContainer.bringSubviewToFront(previewInfoLabel)
     }
 
     @objc private func networkNameChanged() {
@@ -1615,6 +1706,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             localStartupID = startupID
             receiver.onListening = { [weak self] port in
                 guard let self, self.running, self.localStartupID == startupID else { return }
+                self.log("监听器已在端口 \(port) 就绪，开始建立 CarPlay 会话")
                 var live = config; live.port = port
                 self.controlBrowser.start()
                 self.sameDevice.start(configuration: live, identity: identity)
@@ -1627,6 +1719,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             prepareExternalOutput(configuration: config)
             receiver.start(configuration: config, identity: identity, preferredViewer: primaryViewer)
             watchStartupAddress(address)
+            startLiveInfoTimer()
             return
         }
         guard let identity else { return }
@@ -1727,6 +1820,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private func stop() {
         localStartupID = nil
         canvasRestartedFor = nil
+        stopLiveInfoTimer()
         networkStartupTask?.cancel()
         networkStartupTask = nil
         waitingForNetwork = false
