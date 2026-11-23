@@ -178,9 +178,19 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     /// Cached copy of CfMotoTuning.passthroughEnabled (read on the pull path).
     private var passthroughOn = false
-    /// The newest access unit CarPlay produced, waiting for the next pull.
-    private var passthroughAU: Data?
-    private var passthroughAUIsKeyframe = false
+    /// Access units waiting for a pull, oldest first.
+    ///
+    /// A single slot loses every frame that arrives between two pulls, and in passthrough a lost
+    /// P-frame is not free: it is referenced by the ones after it, so the dash decodes the rest of
+    /// the GOP against a picture it never received - which is exactly the tearing seen on the
+    /// simulator. A small queue absorbs the bursts instead.
+    private var passthroughQueue: [(data: Data, keyframe: Bool)] = []
+    /// Depth at which the queue is abandoned: too far behind to be worth catching up.
+    private static let passthroughQueueLimit = 8
+    /// Set after a flush, so only a keyframe restarts the chain.
+    private var passthroughAwaitingIDR = false
+    /// How many times the queue had to be abandoned for a fresh keyframe.
+    private var passthroughResyncs = 0
     /// The newest keyframe, kept because a lock-step pull needs a repeatable frame.
     private var passthroughIDR: Data?
     /// Latest SPS/PPS in Annex-B form, prepended to a keyframe that does not carry its own.
@@ -246,6 +256,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         if dropNoPicture > 0 { problems.append("空画面 \(dropNoPicture)") }
         if dropNoCallback > 0 { problems.append("解码器没回应 \(dropNoCallback)") }
         if decodeErrors > 0 { problems.append("解码出错 \(decodeErrors)") }
+        if passthroughResyncs > 0 { parts.append("直通重新同步 \(passthroughResyncs) 次") }
         if !problems.isEmpty { parts.append("异常：" + problems.joined(separator: "、")) }
         return parts.joined(separator: " · ")
     }
@@ -324,7 +335,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             lock.lock()
             let stalePad = padEncoder
             padEncoder = nil; padCanvasKey = ""; padKeyframeAU = nil; padGeneration = -1
-            passthroughAU = nil; passthroughIDR = nil; passthroughParameters = Data()
+            passthroughQueue.removeAll(); passthroughAwaitingIDR = false; passthroughIDR = nil; passthroughParameters = Data()
             lock.unlock()
             stalePad?.invalidate()
             queue.invalidateKeyframe()
@@ -489,22 +500,34 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             combined.append(data)
             forward = combined
         }
-        passthroughAU = forward
-        passthroughAUIsKeyframe = keyframe
-        if keyframe { passthroughIDR = forward }
+        // A frame that arrives while the chain is broken cannot be used: everything after it
+        // references a picture the dash never got. Wait for a keyframe instead.
+        if passthroughAwaitingIDR, !keyframe {
+            lock.unlock()
+            return
+        }
+        if keyframe { passthroughIDR = forward; passthroughAwaitingIDR = false }
+        passthroughQueue.append((forward, keyframe))
+        if passthroughQueue.count > Self.passthroughQueueLimit {
+            // Too far behind to catch up: abandon the queue and restart at the next keyframe.
+            passthroughQueue.removeAll()
+            passthroughAwaitingIDR = true
+            passthroughResyncs += 1
+            lock.unlock()
+            requestKeyframeIfUseful()
+            return
+        }
         lock.unlock()
     }
 
     /// One pull answered from what CarPlay sent. Returns nil only before the first picture.
     private func servePassthrough(waiting: Bool, since: Date) -> EncodedFrame? {
         lock.lock()
-        let fresh = passthroughAU
-        let freshIsKeyframe = passthroughAUIsKeyframe
+        let next = passthroughQueue.isEmpty ? nil : passthroughQueue.removeFirst()
         let idr = passthroughIDR
-        passthroughAU = nil
-        if let fresh {
+        if let next {
             servedCount += 1
-            noteServed(fresh.count, keyframe: freshIsKeyframe)
+            noteServed(next.data.count, keyframe: next.keyframe)
         } else if let idr {
             // No new picture: the link still wants an answer, and only a keyframe may be repeated.
             servedCount += 1; repeatedCount += 1
@@ -514,8 +537,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         let seq = sequence
         lock.unlock()
         if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter { requestKeyframeIfUseful() }
-        if let fresh {
-            return EncodedFrame(accessUnit: fresh, isKeyframe: freshIsKeyframe,
+        if let next {
+            return EncodedFrame(accessUnit: next.data, isKeyframe: next.keyframe,
                                 presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
         }
         if let idr {
@@ -714,7 +737,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         let oldEncoder = encoder; encoder = nil
         let oldPad = padEncoder; padEncoder = nil
         padEncodedResult = nil; padKeyframeAU = nil; padGeneration = -1
-        passthroughAU = nil; passthroughIDR = nil; passthroughParameters = Data()
+        passthroughQueue.removeAll(); passthroughAwaitingIDR = false; passthroughIDR = nil; passthroughParameters = Data()
         lock.unlock()
         // Invalidate OUTSIDE the lock. VTCompressionSessionInvalidate waits for the in-flight frame,
         // and the callback that finishes it stores the result under this same lock - so invalidating
