@@ -44,10 +44,16 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var canvas: VideoCanvas?
     private var encoderSettings = EncoderParameters()
 
+    /// Encoder hint: the next encode should be forced to an IDR.
     private var waitingForIDR = true
+    /// Decoder gate, kept separate on purpose. Padding a pull re-encodes the current picture as an
+    /// IDR every few milliseconds, and clearing one shared flag there would tell a *dead decoder*
+    /// that it no longer needs a keyframe - the exact state (decoder nil, flag false) that froze the
+    /// dash before.
+    private var decoderNeedsKeyframe = true
     /// When the decoder started waiting for a keyframe. A long wait means the link died while the
     /// app was in the background, and repeating the last picture would freeze the dash for good.
-    private var waitingSince = Date.distantPast
+    private var decoderWaitingSince = Date.distantPast
     private let idrGiveUpAfter: TimeInterval = 2.0
     private var sequence: UInt64 = 0
     private var lastCodecFailure = -Double.infinity
@@ -120,6 +126,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             encoder?.invalidate()
             encoder = nil
             waitingForIDR = true
+            decoderNeedsKeyframe = true
+            decoderWaitingSince = Date()
         }
         lock.unlock()
 
@@ -149,7 +157,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         decoder = nil
         decodeBox = DecodeBox()
         waitingForIDR = true
-        waitingSince = Date()
+        decoderNeedsKeyframe = true
+        decoderWaitingSince = Date()
         lock.unlock()
         queue.invalidateKeyframe()
         queue.resynchronize()
@@ -159,47 +168,54 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
         lock.lock(); pulls += 1; lock.unlock()
 
-        // Short wait only: encoding never happens on this path any more, so a queued frame is
-        // either there or about to be. Waiting longer just delays the dash.
-        if let frame = await queue.next(timeout: min(timeout, 0.025)) {
+        // CarPlay delivers in bursts and every picture needs decode + encode (20-40 ms) before it
+        // reaches the queue, so a pull that arrives a moment early finds nothing even when the
+        // supply exceeds the pull rate (measured: 21 frames/s arriving, 18 pulls/s, yet a third of
+        // the pulls fell in that in-flight window). Waiting 25 ms was shorter than the pipeline
+        // itself; 50 ms lets the frame that is already being processed answer the pull.
+        let waitForQueued = min(timeout, 0.050)
+        if let frame = await queue.next(timeout: waitForQueued) {
             lock.lock(); servedCount += 1; lock.unlock()
             return frame
         }
 
-        // Nothing new. The dash still expects one frame per pull, and CarPlay falls to 1-2 fps on a
-        // static screen.
+        // Still nothing: answer from the picture in hand.
         //
-        // Re-encoding the cached picture costs one hardware encode and yields a fresh P-frame of a
-        // few hundred bytes, where resending the last IDR sent 26 KB of identical bytes six times a
-        // second (129 MB in fifteen minutes in the field log). The canvas is already letterboxed, so
-        // this does no CoreImage work. The encoder still emits an IDR every second, which is what a
-        // dash needs to resynchronise.
-        // While the decoder is waiting for a keyframe, the picture in hand is stale: re-sending it
-        // keeps the dash showing a frozen frame that looks like a live stream, so the dash never
-        // reconnects and never re-negotiates. Once the wait is long, answer nothing instead - the
-        // dash then drops the media link, reconnects, and the fresh session asks for a keyframe.
+        // It has to be *this* picture, not the last keyframe's bytes. Resending the cached IDR was
+        // cheap, but that access unit belongs to the picture of up to a second ago, so the dash
+        // showed the older frame every time a pull was padded - a music progress bar visibly walked
+        // backwards (52 s, 51 s, 52 s). Encoding the current picture with forceKeyframe gives fresh
+        // content *and* an IDR, which is the only kind that may be repeated (a repeated P-frame is
+        // a §15.2 violation because re-applying it corrupts the picture).
         lock.lock()
-        let waiting = waitingForIDR
-        let since = waitingSince
+        let waiting = decoderNeedsKeyframe
+        let since = decoderWaitingSince
         let prepared = fittedBuffer
         let canvas = self.canvas
         lock.unlock()
         if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter {
-            // Still answer: this link is lock-step (one pull, one frame), so returning nothing makes
-            // the dash wait for a reply that never comes, and nine seconds later it drops the media
-            // link. Falling through to the cached access unit keeps the session alive while the
-            // keyframe request below keeps asking CarPlay for a fresh one.
-            diagnose("等关键帧 \(Int(Date().timeIntervalSince(since)))s，先用缓存帧维持会话")
+            // Keep the session alive while the keyframe request below keeps asking CarPlay for a
+            // fresh one; answering nothing would park a lock-step dash until its 9 s timeout.
+            diagnose("等关键帧 \(Int(Date().timeIntervalSince(since)))s，先用当前画面维持会话")
             onKeyframeRequest?()
         }
-        // Repeat the last *keyframe*, the way the reference client does (cfmoto-ios
-        // H264Encoder.lastKeyframe + restartStream). A repeated P-frame is a spec violation
-        // (§15.2) because re-applying it corrupts the dash's picture; an IDR is self-contained and
-        // therefore safe to resend as often as a pull needs.
+        if let prepared, let canvas, let frame = encode(prepared, canvas: canvas, force: true) {
+            lock.lock()
+            servedCount += 1; repeatedCount += 1
+            sequence &+= 1
+            let seq = sequence
+            lock.unlock()
+            return EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
+                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
+        }
+
+        // Encoding is unavailable right now. The cached keyframe is stale, so this is a last resort
+        // and the log says so; it beats stalling the link.
         lock.lock()
         let keyframe = lastKeyframeAU
         lock.unlock()
         if let keyframe {
+            diagnose("编码不可用，暂用旧关键帧补帧")
             lock.lock()
             servedCount += 1; repeatedCount += 1
             sequence &+= 1
@@ -211,7 +227,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
         // No picture has ever been encoded (CarPlay has not produced anything yet): let it miss.
         // This empties the dash's reply slot, so it must stay rare - the log says when it happens.
-        let remaining = max(0, timeout - 0.025)
+        let remaining = max(0, timeout - waitForQueued)
         if remaining > 0, let frame = await queue.next(timeout: remaining) {
             lock.lock(); servedCount += 1; lock.unlock()
             return frame
@@ -271,11 +287,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         lock.lock(); let alive = !stopped; let canvas = self.canvas; lock.unlock()
         guard alive, let canvas else { return }
 
-        guard let image = decode(data, keyframe: keyframe) else {
-            let waiting = lock.withLock { waitingForIDR }
-            diagnose("decode returned nil (keyframe=\(keyframe) waitingIDR=\(waiting) sps=\(paramSets))")
-            return
-        }
+        guard let image = decode(data, keyframe: keyframe) else { return }
         lock.lock(); decodedCount += 1; lock.unlock()
         guard let prepared = try? fitted(image, width: canvas.width, height: canvas.height) else {
             diagnose("letterbox failed")
@@ -307,7 +319,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 if VideoCodec.h264.parameterSet(unit) != nil {
                     sawParameterSet = true
                     if parameters.absorb(unit) {
-                        lock.lock(); waitingForIDR = true; waitingSince = Date(); paramSets += 1
+                        lock.lock(); waitingForIDR = true; decoderWaitingSince = Date(); paramSets += 1
                         parametersReady = parameters.isComplete; lock.unlock()
                     }
                 } else {
@@ -315,21 +327,22 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 }
             }
             // A missing decoder must always mean "rebuild needed". The field log showed the two can
-            // disagree (decoder nil while waitingForIDR was false), and then the rebuild branch is
-            // skipped for every frame: 2579 frames were counted as "no decoder" and the dash stayed
-            // frozen on the last cached picture with the link healthy.
+            // disagree (decoder nil while the gate was false), and then the rebuild branch is skipped
+            // for every frame: 2579 frames were counted as "no decoder" and the dash stayed frozen on
+            // the last cached picture with the link healthy.
             lock.lock()
-            if decoder == nil, !waitingForIDR {
-                waitingForIDR = true
-                if waitingSince == .distantPast { waitingSince = Date() }
+            if decoder == nil, !decoderNeedsKeyframe {
+                decoderNeedsKeyframe = true
+                if decoderWaitingSince == .distantPast { decoderWaitingSince = Date() }
             }
-            let needsRebuild = waitingForIDR
-            let waitedLong = Date().timeIntervalSince(waitingSince)
+            let needsRebuild = decoderNeedsKeyframe
+            let waitedLong = Date().timeIntervalSince(decoderWaitingSince)
             lock.unlock()
 
             if needsRebuild {
                 guard parameters.isComplete, !picture.isEmpty else {
                     lock.lock(); dropWaitingIDR += 1; lock.unlock()
+                    onKeyframeRequest?()
                     return nil
                 }
                 // Normally a rebuild waits for a keyframe. But if none arrives for this long, build
@@ -358,8 +371,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 decoder?.invalidate()
                 decoder = rebuilt
                 decodeBox = freshBox
-                waitingForIDR = false
-                waitingSince = .distantPast
+                decoderNeedsKeyframe = false
+                decoderWaitingSince = .distantPast
+                // A brand-new decoder starts from an IDR, so the encoder's next frame should be one
+                // too: the dash's decoder is being rebuilt from the same stream.
+                waitingForIDR = true
                 lock.unlock()
             }
             guard let decoder else {
@@ -370,8 +386,17 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             }
             guard !picture.isEmpty else {
                 lock.lock()
-                if sawParameterSet { parameterSetOnly += 1 } else { dropNoPicture += 1 }
+                if sawParameterSet {
+                    // CarPlay sends SPS/PPS as their own access unit; skipping them is correct, so
+                    // this must not look like a decode failure in the log.
+                    parameterSetOnly += 1
+                } else {
+                    dropNoPicture += 1
+                }
+                let key = decoderNeedsKeyframe
                 lock.unlock()
+                // Outside the lock: diagnose() must not run while it is held.
+                if !sawParameterSet { diagnose("空访问单元（无图像片，waitingIDR=\(key)）") }
                 return nil
             }
             try decoder.decode(AnnexB.lengthPrefixed(picture),
@@ -404,7 +429,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     // MARK: - Encode
 
-    private func encode(_ image: CVPixelBuffer, canvas: VideoCanvas) -> H264EncodedFrame? {
+    /// - Parameter force: force an IDR even if one is not due. The pull path uses it to pad a pull
+    ///   with the *current* picture: only an IDR may be sent more than once (§15.2), and the dash
+    ///   must not be shown a picture older than the one it already has.
+    private func encode(_ image: CVPixelBuffer, canvas: VideoCanvas, force: Bool = false) -> H264EncodedFrame? {
         // The work queue encodes new pictures while an idle pull may encode the last one.
         encodeLock.lock()
         defer { encodeLock.unlock() }
@@ -434,10 +462,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             // its pull loop can start mid-stream, so force one instead of waiting for a keyframe that
             // may never come from CarPlay.
             let stale = now - lastKeyframe >= 1.0
-            let force = lock.withLock { waitingForIDR } || stale
+            let keyframeWanted = force || lock.withLock { waitingForIDR } || stale
             try encoder.encode(try fitted(image, width: canvas.width, height: canvas.height),
                                presentationTime: CMTime(seconds: now, preferredTimescale: 1_000_000),
-                               forceKeyframe: force)
+                               forceKeyframe: keyframeWanted)
             encoder.complete()
 
             // complete() returns when VideoToolbox has finished, but the callback that carries the
