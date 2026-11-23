@@ -65,7 +65,11 @@ enum CfMotoTuning {
 
     /// Bitrate used for those pads, as a share of the configured one.
     static var staticPadBitrate: Int {
-        max(600_000, Int(bitrateMbps * 1_000_000 * 0.25))
+        let main = bitrateMbps * 1_000_000
+        // 800 kbit/s is the ceiling that actually made a lone keyframe small; tying the pad to the
+        // main bitrate only made the pad grow with it (a 6 Mbit/s session produced 40 KB pads).
+        // Never above three quarters of the main rate, so the pad is always the cheaper frame.
+        return max(400_000, min(800_000, min(Int(main * 0.25), Int(main * 0.75))))
     }
 
     static var staticPadMbps: Double { Double(staticPadBitrate) / 1_000_000 }

@@ -154,6 +154,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// The pad access unit, valid only while the picture has not changed since it was made.
     private var padKeyframeAU: Data?
     private var padGeneration = -1
+    /// The picture generation whose pad came out no smaller than the normal keyframe. Remembered so
+    /// a rejected pad is not re-attempted on every pull for the same picture.
+    private var padRejectedGeneration = -1
     /// Bumped for every freshly decoded picture, so a cached pad can be checked for staleness.
     private var pictureGeneration = 0
     private var padCount = 0
@@ -206,7 +209,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             "重新压缩 \(encodedCount) 帧",
             "车机索要 \(pulls) 次",
             "成功交付 \(servedCount) 帧",
-            (padCount > 0 ? "其中重复上一帧 \(repeatedCount) 次（轻量补帧 \(padCount) 次）" : "其中重复上一帧 \(repeatedCount) 次"),
+            (padCount > 0 ? "其中重复上一帧 \(repeatedCount) 次（轻量包生成 \(padCount) 个）" : "其中重复上一帧 \(repeatedCount) 次"),
         ]
         var problems: [String] = []
         if dropWaitingIDR > 0 { problems.append("等关键帧丢了 \(dropWaitingIDR)") }
@@ -330,6 +333,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // Another pull may have produced it while this one waited.
         if lock.withLock({ padGeneration == generation }), let cached = lock.withLock({ padKeyframeAU }) {
             return cached
+        if lock.withLock({ padRejectedGeneration == generation }) { return nil }
         }
         let key = "\(canvas.width)x\(canvas.height)"
         lock.lock()
@@ -344,7 +348,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 padEncoder = try H264Encoder(
                     width: canvas.width, height: canvas.height,
                     fps: encoderSettings.frameRate, bitrate: CfMotoTuning.staticPadBitrate,
-                    profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .auto
+                    profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .auto,
+                    // Bias quantisation directly: a lone keyframe after idle would otherwise ignore
+                    // the bitrate target entirely.
+                    quality: 0.15
                 ) { [weak self] outcome in
                     guard let self else { return }
                     self.lock.lock(); self.padEncodedResult = outcome; self.lock.unlock()
@@ -378,13 +385,22 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             lock.lock(); padEncodedResult = nil; lock.unlock()
             guard let frame = try outcome?.get() else { return nil }
             lock.lock()
-            padKeyframeAU = frame.data
-            padGeneration = generation
-            padCount += 1
+            let padSize = frame.data.count
             let fullSize = lastKeyframeAU?.count ?? 0
+            // A pad that is not clearly smaller is not worth a second encode: reuse the normal
+            // keyframe instead, and do not try again for this picture.
+            let useful = fullSize == 0 || padSize * 10 <= fullSize * 7
+            padKeyframeAU = useful ? frame.data : nil
+            padGeneration = generation
+            if !useful { padRejectedGeneration = generation }
+            padCount += 1
             lock.unlock()
-            // Once per new picture: this is the line that says what the option actually costs.
-            log?("静止补帧：轻量包 \(frame.data.count / 1024) KB" +
+            guard useful else {
+                // Reported once per picture; the caller then reuses the normal keyframe.
+                log?("静止补帧：轻量包 \(padSize / 1024) KB 未比正常关键帧 \(fullSize / 1024) KB 小 30%，改用正常帧")
+                return nil
+            }
+            log?("静止补帧：轻量包 \(padSize / 1024) KB" +
                  (fullSize > 0 ? "（正常关键帧 \(fullSize / 1024) KB）" : "") +
                  String(format: " · 补帧码率 %.1f Mbps", CfMotoTuning.staticPadMbps))
             return frame.data

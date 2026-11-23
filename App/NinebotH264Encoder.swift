@@ -108,6 +108,10 @@ final class H264Encoder {
     private let lock = NSLock()
     private let fps: Int
     private let profileLevel: ProfileLevel
+    /// Optional compression-quality bias (0 = smallest, 1 = best). Used by the static-picture pad
+    /// encoder: AverageBitRate alone does not cap a lone keyframe after an idle period, but Quality
+    /// biases quantisation directly, so one frame comes out small without rate-control history.
+    private let quality: Double?
     /// True when the session fell back to the software encoder (App in the background).
     private(set) var usingSoftware = false
 
@@ -122,9 +126,10 @@ final class H264Encoder {
     }
 
     init(width: Int, height: Int, fps: Int, bitrate: Int, profileLevel: ProfileLevel = .auto,
-         output: @escaping (Result<H264EncodedFrame, Error>) -> Void) throws {
+         quality: Double? = nil, output: @escaping (Result<H264EncodedFrame, Error>) -> Void) throws {
         self.fps = fps
         self.profileLevel = profileLevel
+        self.quality = quality
         callbackBox.handler = output
 
         let attributes: [CFString: Any] = [
@@ -196,6 +201,9 @@ final class H264Encoder {
                         try set(kVTCompressionPropertyKey_ProfileLevel,
                     value: profileLevel == .baseline31 ? kVTProfileLevel_H264_Baseline_3_1
                                                       : kVTProfileLevel_H264_Baseline_AutoLevel)
+            // Best effort: not every encoder honours Quality, and a rejected property must not
+            // cost us the session.
+            if let quality { try? set(kVTCompressionPropertyKey_Quality, value: quality as CFNumber) }
             try set(kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
             try set(kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
             // 关键帧节奏由 MirrorSession 每 0.5 秒强制请求（与官方 iOS 抓包、Android 版一致）；
