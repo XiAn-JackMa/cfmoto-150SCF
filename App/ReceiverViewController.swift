@@ -2218,6 +2218,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // stops feeding video, the dash keeps pulling, and the picture would freeze on the dash
         // while the phone looks fine. Ask for a keyframe as soon as we are foreground again.
         if outputMode.isEasyConn {
+            // Foreground again before rebuilding: the decoder resync asks CarPlay for a keyframe,
+            // and that request is suppressed while the app is still marked as backgrounded.
+            receiver.setCfMotoBackgrounded(false)
             // Same shape as the reference client's restartStream(): rebuild rather than poke.
             receiver.resynchronizeCfMotoVideo()
         }
@@ -2238,6 +2241,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // willResignActive may have failed to start it (e.g. the session was busy); try once more
         // before deciding the session cannot survive in the background.
         if keepAliveSwitch.isOn, !keepAlive.isRunning, keepAlive.start() { log("后台保持在进入后台时重试成功") }
+        // iOS revokes the hardware encoder here; drop ours before it fails with -12903.
+        if outputMode.isEasyConn { receiver.setCfMotoBackgrounded(true) }
         if canRunInBackground {
             log(keepAlive.isRunning ? "App 已进入后台，CarPlay 继续运行" : "App 已进入后台，由画中画保持运行")
         } else {

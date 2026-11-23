@@ -35,6 +35,8 @@ final class CfMotoOutput {
     /// the foreground: the decompression session is what does not survive being backgrounded.
     /// Re-applies the manual bitrate/profile overrides to the running session.
     func applyTuning() { source.reloadTuning() }
+    /// The app left or returned to the foreground: the hardware encoder does not survive that.
+    func setBackgrounded(_ value: Bool) { source.setBackgrounded(value) }
 
     func resynchronizeVideo() {
         source.resynchronize()
@@ -181,6 +183,7 @@ final class CfMotoOutput {
             " (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))" +
             " · \(UIDevice.current.model) iOS \(UIDevice.current.systemVersion)" +
             " · 本机IP \(localAddress.isEmpty ? "-" : localAddress)")
+        log("画面参数：\(CfMotoTuning.summary)")
         onState?("正在连接春风车机…")
         log("等待车机在 10930 响应探测…")
 

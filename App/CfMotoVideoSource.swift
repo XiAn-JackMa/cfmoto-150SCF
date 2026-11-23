@@ -107,6 +107,14 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     /// Asks CarPlay for a fresh keyframe (the dash just resynchronised its decoder).
     var onKeyframeRequest: (() -> Void)?
+
+    /// Its own lock, never `lock`: requestKeyframeIfUseful() is called from ten places, several of
+    /// them a line away from a lock/unlock pair, and re-acquiring a non-recursive NSLock deadlocks.
+    private let backgroundLock = NSLock()
+    /// True while the app is backgrounded. CarPlay suspends its video there, so a keyframe request
+    /// cannot be answered - each one is an encrypted write on the event channel, and a failed write
+    /// closes that channel. Better not to ask at all.
+    private var isBackgrounded = false
     var log: ((String) -> Void)?
 
     /// Counters for the status card: where a pull stalls is what the rider needs to see.
@@ -220,7 +228,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     init(queueCapacity: Int = 3) {
         queue = FrameQueue(capacity: queueCapacity)
-        queue.onKeyframeNeeded = { [weak self] in self?.onKeyframeRequest?() }
+        queue.onKeyframeNeeded = { [weak self] in self?.requestKeyframeIfUseful() }
     }
 
     // MARK: - VideoFrameSource
@@ -244,8 +252,14 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // completes it needs this same lock.
         retired?.invalidate()
 
-        log?("CFMOTO canvas \(canvas.width)x\(canvas.height) (dash asked \(canvas.requestedWidth)x\(canvas.requestedHeight)) " +
-             "bitrate=\(parameters.bitrate) fps=\(parameters.frameRate)")
+        // Report the settings actually applied, not the profile default: the EasyConn page can
+        // override the bitrate, and printing the raw value made a 6 Mbit/s session read as 2.5.
+        let effective = encoderSettings
+        log?("CFMOTO canvas \(canvas.width)x\(canvas.height)（车机请求 \(canvas.requestedWidth)x\(canvas.requestedHeight)）" +
+             String(format: " · 实际编码 %.1f Mbps @ %d fps · 关键帧 %.1f 秒 · %@",
+                    Double(effective.bitrate) / 1_000_000, effective.frameRate,
+                    effective.keyframeIntervalSeconds,
+                    effective.forceBaseline ? "Baseline 3.1" : "自动 profile"))
         if sizeChanged {
             // A keyframe of the previous canvas must never answer a pull for this one: a cached
             // access unit from the old size would decode as garbage on the dash.
@@ -265,6 +279,33 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         }
         // After the queue reset above, so the pattern's first keyframe is not flushed by it.
         startPatternIfNeeded()
+    }
+
+    /// Asks CarPlay for a keyframe, unless the app is backgrounded where nothing can answer.
+    private func requestKeyframeIfUseful() {
+        guard !backgroundLock.withLock({ isBackgrounded }) else { return }
+        onKeyframeRequest?()
+    }
+
+    /// Called when the app leaves or returns to the foreground.
+    ///
+    /// Backgrounding revokes the hardware encoder: the session handle stays non-nil but
+    /// VTCompressionSessionEncodeFrame then fails with -12903 (kVTInvalidSessionErr). Dropping it
+    /// here turns that failed encode into a clean rebuild on the next pull, which also falls back to
+    /// the software encoder when the hardware one refuses to come back.
+    func setBackgrounded(_ value: Bool) {
+        backgroundLock.lock()
+        let changed = isBackgrounded != value
+        isBackgrounded = value
+        backgroundLock.unlock()
+        guard changed else { return }
+        lock.lock()
+        let retired = value ? encoder : nil
+        if value { encoder = nil; waitingForIDR = true }
+        lock.unlock()
+        guard let retired else { return }
+        retired.invalidate()
+        log?("App 进入后台：已释放编码器，下次需要时自动重建")
     }
 
     /// Hard reset, the equivalent of the reference client's `restartStream()`: drop the decoder and
@@ -288,7 +329,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         retired?.invalidate()
         queue.invalidateKeyframe()
         queue.resynchronize()
-        onKeyframeRequest?()
+        requestKeyframeIfUseful()
     }
 
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
@@ -318,7 +359,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             sequence &+= 1
             let seq = sequence
             lock.unlock()
-            if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter { onKeyframeRequest?() }
+            if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter { requestKeyframeIfUseful() }
             return EncodedFrame(accessUnit: keyframe, isKeyframe: true,
                                 presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
         }
@@ -327,7 +368,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 // The decoder cannot use the stream; keep the link alive while CarPlay is asked for
                 // a keyframe. Answering nothing would park a lock-step dash until its 9 s timeout.
                 diagnose("等关键帧 \(Int(Date().timeIntervalSince(since)))s，先用当前画面维持会话")
-                onKeyframeRequest?()
+                requestKeyframeIfUseful()
             }
             if let frame = encode(prepared, canvas: canvas, force: !dirty) {
                 lock.lock()
@@ -418,7 +459,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         if !reject { pending += 1 }
         let needIDR = skipping
         lock.unlock()
-        if needIDR { onKeyframeRequest?() }
+        if needIDR { requestKeyframeIfUseful() }
         guard !reject else { diagnose("input dropped by backpressure (pending=\(pending))"); return }
 
         work.async { [weak self] in
@@ -538,7 +579,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             if needsRebuild {
                 guard parameters.isComplete, !picture.isEmpty else {
                     lock.lock(); dropWaitingIDR += 1; lock.unlock()
-                    onKeyframeRequest?()
+                    requestKeyframeIfUseful()
                     return nil
                 }
                 // Normally a rebuild waits for a keyframe. But if none arrives for this long, build
@@ -547,12 +588,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 let forceWithoutKeyframe = !keyframe && waitedLong > 3.0
                 guard keyframe || forceWithoutKeyframe else {
                     lock.lock(); dropWaitingIDR += 1; lock.unlock()
-                    onKeyframeRequest?()
+                    requestKeyframeIfUseful()
                     return nil
                 }
                 guard ProcessInfo.processInfo.systemUptime - lastCodecFailure >= 0.5 else {
                     lock.lock(); dropCooldown += 1; lock.unlock()
-                    onKeyframeRequest?()
+                    requestKeyframeIfUseful()
                     return nil
                 }
                 if forceWithoutKeyframe {
@@ -577,7 +618,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             }
             guard let decoder else {
                 lock.lock(); dropNoDecoder += 1; lock.unlock()
-                onKeyframeRequest?()
+                requestKeyframeIfUseful()
                 diagnose("解码器缺失，已请求关键帧（本帧丢弃）")
                 return nil
             }
@@ -620,7 +661,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             lastCodecFailure = ProcessInfo.processInfo.systemUptime
             lock.lock(); decodeErrors += 1; lock.unlock()
             diagnose("decode failed: \(error.localizedDescription)")
-            onKeyframeRequest?()
+            requestKeyframeIfUseful()
             return nil
         }
     }

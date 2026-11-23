@@ -3,6 +3,23 @@ import Network
 
 /// All listener/session state is confined to queue. UI callbacks are always main-thread.
 final class NativeReceiver {
+    /// Started at launch, not when EasyConn does. The whole point of the endpoint is watching a
+    /// session that will not start, so it cannot depend on one having started.
+    init() {
+        let output = cfmoto
+        cfmotoLogServer.text = { [weak output] in
+            guard let output else { return "" }
+            return output.diagnostics + "\n\n" + output.store.text
+        }
+        cfmotoLogServer.page = { [weak output] since in
+            guard let output else { return (since, []) }
+            return output.store.lines(from: since)
+        }
+        // Straight into the store: the same file and page, without needing the view controller.
+        cfmotoLogServer.onLog = { [weak output] in output?.store.append($0) }
+        cfmotoLogServer.start()
+    }
+
     private let queue = DispatchQueue(label: "TDSCarKit.receiver")
     private var listener: NWListener?
     /// Fires if a fresh listener has not reached .ready: binding can stall without ever
@@ -79,6 +96,8 @@ final class NativeReceiver {
     func resynchronizeCfMotoVideo() { cfmoto.resynchronizeVideo() }
     /// Bitrate / profile overrides changed on the settings page.
     func applyCfMotoTuning() { cfmoto.applyTuning() }
+    /// App moved between background and foreground.
+    func setCfMotoBackgrounded(_ value: Bool) { cfmoto.setBackgrounded(value) }
     /// Full EasyConn log, as shown on screen and served on :10950.
     var cfmotoLogText: String { cfmoto.store.text }
     /// The same log as a file, for the share sheet (works with AirDrop / WeChat / Files).
@@ -169,17 +188,6 @@ final class NativeReceiver {
                 self.cfmoto.setTestPattern(configuration.cfmotoTestPattern)
                 self.cfmoto.start(localAddress: ReceiverConfiguration.wifiIPv4Address() ?? configuration.address,
                                   targetAddress: target, port: configuration.cfmotoPort)
-                // Read the log from a PC instead of copying it off the phone by hand.
-                self.cfmotoLogServer.text = { [weak self] in
-                    guard let self else { return "" }
-                    return self.cfmotoDiagnostics + "\n\n" + self.cfmotoLogText
-                }
-                self.cfmotoLogServer.page = { [weak self] since in
-                    guard let self else { return (since, []) }
-                    return self.cfmoto.store.lines(from: since)
-                }
-                self.cfmotoLogServer.onLog = { [weak self] in self?.log($0) }
-                self.cfmotoLogServer.start()
             }
             if configuration.carLifeEnabled {
                 self.carLife.onLog = { [weak self] in self?.log($0) }
@@ -436,7 +444,6 @@ final class NativeReceiver {
         step("ninebot") { ninebot.stop() }
         step("tailing") { tailing.stop() }
         step("cfmoto") { cfmoto.stop() }
-        step("cfmotoLogServer") { cfmotoLogServer.stop() }
         step("carLink") { carLink.stop() }
         #if DEBUG
         diagnosticStarted = ProcessInfo.processInfo.systemUptime
