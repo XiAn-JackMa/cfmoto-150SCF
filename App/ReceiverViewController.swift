@@ -217,6 +217,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let heading = UILabel()
     private let explanation = UILabel()
     private let statusLabel = UILabel()
+    /// When the local CarPlay start was requested, so the first frame can report how long it took.
+    private var carPlayStartAt: Date?
+    private var carPlayWatchdog: DispatchWorkItem?
     private let startupHint = UILabel()
     private var startupHintTask: DispatchWorkItem?
     private var startupHintGeneration = UUID()
@@ -621,6 +624,14 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 if !self.displayedVideo {
                     self.inlineVideoContainer.isHidden = false
                     self.displayedVideo = true; self.statusLabel.text = "正在显示 CarPlay"
+                    if let started = self.carPlayStartAt {
+                        let took = Date().timeIntervalSince(started)
+                        self.log(String(format: "CarPlay 首帧已到达（启动用了 %.1f 秒）", took))
+                        self.carPlayStartAt = nil
+                    } else {
+                        self.log("CarPlay 首帧已到达")
+                    }
+                    self.carPlayWatchdog?.cancel(); self.carPlayWatchdog = nil
                     self.clearStartupHint()
                     self.networkStartupTask?.cancel()
                     self.networkStartupTask = nil
@@ -1605,6 +1616,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 self.controlBrowser.start()
                 self.sameDevice.start(configuration: live, identity: identity)
             }
+            // Stamp the request so the first frame can report how long CarPlay took, and warn if it
+            // never comes: a session that produces no picture is otherwise silent in the log.
+            carPlayStartAt = Date()
+            log("请求启动本机 CarPlay")
+            armCarPlayWatchdog()
             prepareExternalOutput(configuration: config)
             receiver.start(configuration: config, identity: identity, preferredViewer: primaryViewer)
             watchStartupAddress(address)
@@ -1734,6 +1750,21 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         modeChanged()
         statusLabel.text = identity == nil ? "需要导入 MFi 身份" : "已停止"
         log("CarPlay 接收已停止")
+    }
+
+    /// Says so, in the exported log, when the local CarPlay session never produces a picture -
+    /// which is what "卡在正在启动 CarPlay" looks like from the bike.
+    private func armCarPlayWatchdog() {
+        carPlayWatchdog?.cancel()
+        let generation = startupHintGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.startupHintGeneration == generation,
+                  self.running, !self.displayedVideo, let started = self.carPlayStartAt else { return }
+            let took = Int(Date().timeIntervalSince(started))
+            self.log("[警告] CarPlay 已 \(took) 秒没有输出首个画面 —— 会话没有建立，停在「正在启动」")
+        }
+        carPlayWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: work)
     }
 
     private func clearStartupHint() {
@@ -1971,13 +2002,17 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
     }
     @objc private func copyLog() { UIPasteboard.general.string = lines.joined(separator: "\n") }
-    private func log(_ message: String) {
+    private func log(_ message: String, mirrorToStore: Bool = true) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         lines.append("\(timestamp)  \(message)"); if lines.count > 200 { lines.removeFirst(lines.count - 200) }
         if logView.window != nil {
             logView.text = lines.joined(separator: "\n")
             if !logView.text.isEmpty { logView.scrollRangeToVisible(NSRange(location: logView.text.utf16.count - 1, length: 1)) }
         }
+        // The exported EasyConn log used to hold only EasyConn lines, so a CarPlay session that never
+        // produced a picture left no trace in it at all. Mirror everything; EasyConn's own lines
+        // arrive through onCfMotoLog and are already in the store, so those pass mirrorToStore: false.
+        if mirrorToStore { receiver.appendCfMotoLogText(message) }
         NSLog("[CarWithin] %@", message)
     }
 }

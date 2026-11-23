@@ -207,14 +207,18 @@ final class CfMotoOutput {
                 } else {
                     self.log("[车机] 尚无数据 状态=\(state.replacingOccurrences(of: "[状态] ", with: ""))")
                 }
+                // Always log the counters: replacing them with a warning hid the one thing needed to
+                // tell a CarPlay problem from an EasyConn one.
                 let idle = self.source.inboundIdle
                 if idle > 5 {
-                    // The dash is showing black because CarPlay has not produced a picture; that is
-                    // a CarPlay session problem, not an EasyConn one, and saying so saves a lot of
-                    // guessing at the bike.
-                    self.log("[管道] CarPlay 已 \(Int(idle)) 秒没有出画面 —— 车机看到的是黑屏，问题在 CarPlay 会话，不在投屏")
+                    self.log("[管道] \(self.source.counters)")
+                    // The dash is showing black because CarPlay has not produced a picture; that is a
+                    // CarPlay session problem, not an EasyConn one. One line, and only when the
+                    // silence changes, so a long black period does not bury the log.
+                    self.noteCarPlaySilence(idle)
                 } else {
                     self.log("[管道] \(self.source.counters)")
+                    self.lastSilenceSeconds = 0
                 }
                 // Counters go to the log view only. Raising the status label here would rebuild the
                 // settings table every few seconds, which fights the log field the rider is reading.
@@ -249,6 +253,18 @@ final class CfMotoOutput {
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         return "CarWithin \(version) (\(build)) · CFMOTO \(lastState) · \(source.counters) · " +
             (link != nil ? "link=up" : "link=down")
+    }
+
+    /// Last silence length that was already reported, so the log gets one line per change of scale
+    /// rather than one per tick.
+    private var lastSilenceSeconds = 0
+
+    /// Reports a CarPlay silence once, naming the component at fault.
+    private func noteCarPlaySilence(_ idle: TimeInterval) {
+        let seconds = Int(idle)
+        guard seconds / 10 != lastSilenceSeconds / 10 else { return }
+        lastSilenceSeconds = seconds
+        log("[警告] CarPlay 已 \(seconds) 秒没有输出画面，车机显示的是黑屏 —— 问题在 CarPlay 会话，EasyConn 链路正常")
     }
 
     /// Last time a link was stopped, so a restart can leave the dash time to finish its own teardown.

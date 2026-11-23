@@ -68,6 +68,9 @@ final class NativeReceiver {
     /// The same log as a file, for the share sheet (works with AirDrop / WeChat / Files).
     var cfmotoLogFile: URL? { cfmoto.store.fileForSharing() }
     func clearCfMotoLog() { cfmoto.store.clear() }
+    /// Lets the rest of the app write into the same exported log, so a CarPlay session that never
+    /// starts is visible next to the EasyConn traffic instead of missing from it.
+    func appendCfMotoLogText(_ line: String) { cfmoto.store.append(line) }
     /// Every EasyConn log line, for the settings screen's text view.
     var onCfMotoLog: ((String) -> Void)?
     private lazy var carLink = CarLinkRelay(queue: queue)

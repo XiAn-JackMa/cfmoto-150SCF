@@ -114,7 +114,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Seconds since CarPlay last produced a picture (large values mean CarPlay itself is silent).
     var inboundIdle: TimeInterval {
         lock.lock(); defer { lock.unlock() }
-        guard inbound > 0 else { return Date().timeIntervalSince(lastInboundAt) }
+        // lastInboundAt is reset when a session prepares, so this is "seconds this session has
+        // gone without a picture" - not a subtraction from distantPast, which printed 63931202261.
         return Date().timeIntervalSince(lastInboundAt)
     }
 
@@ -161,6 +162,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // 114 finds nothing, waits out its 9 s timeout and drops the link - twice in a row after a
         // restart, which is what made "start CarPlay" appear to hang on 正在连接 until the simulator
         // was restarted too. CarPlay replaces this the moment it produces a frame.
+        lock.lock(); lastInboundAt = Date(); lock.unlock()
         if lock.withLock({ fittedBuffer == nil }) {
             if let black = blackFrame(width: canvas.width, height: canvas.height) {
                 lock.lock(); fittedBuffer = black; lock.unlock()
