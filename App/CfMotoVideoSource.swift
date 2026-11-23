@@ -212,7 +212,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             : (parametersReady ? "画面格式：H.264 已就绪" : "画面格式：还在等 CarPlay 的参数")
         // Plain words on purpose: this line is read at the bike, where "拉帧" and "重发" mean nothing.
         var parts = [
-            "CarPlay 送来 \(inbound) 帧",
+            // CarPlay sends SPS/PPS as their own access unit about 40% of the time; those never
+            // become a picture, and leaving them out made the counts look like lost frames
+            // (1753 in, 946 decoded) when the difference was entirely parameter sets.
+            "CarPlay 送来 \(inbound) 帧（其中 \(parameterSetOnly) 帧只是参数包）",
             format,
             "解出画面 \(decodedCount) 帧",
             "重新压缩 \(encodedCount) 帧",
