@@ -157,6 +157,15 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// The picture generation whose pad came out no smaller than the normal keyframe. Remembered so
     /// a rejected pad is not re-attempted on every pull for the same picture.
     private var padRejectedGeneration = -1
+    /// When the last fresh picture arrived. The pad only makes sense once the picture has really
+    /// stopped: between two frames of live video there is a 40 ms gap, and treating that as "static"
+    /// cost one wasted pad encode per picture and filled the log with rejections.
+    private var lastPictureUptime: TimeInterval = 0
+    /// Last time the rejection was explained, so a screen that keeps changing says it once.
+    private var lastPadRejectLog: TimeInterval = 0
+
+    /// How long the picture must have been unchanged before a pad is worth making.
+    static let staticIdleSeconds: TimeInterval = 0.35
     /// Bumped for every freshly decoded picture, so a cached pad can be checked for staleness.
     private var pictureGeneration = 0
     private var padCount = 0
@@ -397,7 +406,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             lock.unlock()
             guard useful else {
                 // Reported once per picture; the caller then reuses the normal keyframe.
-                log?("静止补帧：轻量包 \(padSize / 1024) KB 未比正常关键帧 \(fullSize / 1024) KB 小 30%，改用正常帧")
+                let now = ProcessInfo.processInfo.systemUptime
+                if now - lastPadRejectLog >= 10 {
+                    lastPadRejectLog = now
+                    log?("静止补帧：轻量包 \(padSize / 1024) KB 未比正常关键帧 \(fullSize / 1024) KB 小 30%，改用正常帧（每 10 秒最多提示一次）")
+                }
                 return nil
             }
             log?("静止补帧：轻量包 \(padSize / 1024) KB" +
@@ -483,13 +496,16 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // One pull, one encode of the picture in hand: the dash is lock-step, so a queue in between
         // only adds staleness and overflow. Nothing to encode yet means CarPlay has not produced a
         // picture at all, which only happens in the first moments of a session.
-        let dirty = lock.withLock { pictureDirty }
-        let cacheIsCurrent = lock.withLock { lastServedWasKeyframe }
-        let cachedKeyframe = lock.withLock { lastKeyframeAU }
+        lock.lock()
+        let dirty = pictureDirty
+        let cacheIsCurrent = lastServedWasKeyframe
+        let cachedKeyframe = lastKeyframeAU
+        let pictureIdle = ProcessInfo.processInfo.systemUptime - lastPictureUptime
+        lock.unlock()
         // Only reuse the cache when the frame already sent *was* a keyframe: then the cache and the
         // current picture agree. If the last frame was a P, the cached IDR is older than the picture
         // in hand, and resending it is how the progress bar walked backwards (52 s, 51 s, 52 s).
-        if !dirty, staticPadOn, let prepared, let canvas,
+        if !dirty, staticPadOn, pictureIdle >= Self.staticIdleSeconds, let prepared, let canvas,
            let pad = staticPadAccessUnit(prepared, canvas: canvas) {
             // The still picture, re-compressed small: same content, a fraction of the bytes.
             lock.lock()
@@ -642,7 +658,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // several times a second; FrameQueue's overflow policy flushes and closes its keyframe gate,
         // which left the queue empty and gated essentially always (measured: 100% of pulls were
         // padded, not one queued frame ever served).
-        lock.lock(); fittedBuffer = prepared; pictureDirty = true; pictureGeneration += 1; lock.unlock()
+        lock.lock()
+        fittedBuffer = prepared; pictureDirty = true; pictureGeneration += 1
+        lastPictureUptime = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
     }
 
 
@@ -1015,6 +1034,7 @@ extension CfMotoVideoSource {
         fittedBuffer = buffer
         pictureDirty = true
         pictureGeneration += 1
+        lastPictureUptime = ProcessInfo.processInfo.systemUptime
         lock.unlock()
     }
 
