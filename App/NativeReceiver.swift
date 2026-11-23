@@ -100,6 +100,7 @@ final class NativeReceiver {
         let listening = onListening
         queue.async { [weak self] in
             guard let self else { return }
+            self.log("接收器：队列开始启动")
             self.stopOnQueue()
             self.videoOutput.onLog = { [weak self] in self?.log($0) }
             self.videoOutput.onAirPlayReady = { [weak self] id in
@@ -388,6 +389,7 @@ final class NativeReceiver {
         (try? AnnexB.units(in: accessUnit))?.contains { codec.isRandomAccess($0) } ?? false
     }
     private func stopOnQueue() {
+        log("接收器：停止开始")
         DispatchQueue.main.async { [weak self] in self?.discoveryService?.stop(); self?.discoveryService = nil }
         readyDeadline?.cancel(); readyDeadline = nil
         generation = UUID(); listener?.cancel(); listener = nil
@@ -410,6 +412,7 @@ final class NativeReceiver {
         for connection in connections.values { connection.cancel() }
         connections.removeAll()
         sessions.values.forEach { $0.media?.stop() }; sessions.removeAll()
+        log("接收器：停止完成")
     }
     private final class SessionState {
         var parser = RTSPParser()

@@ -140,14 +140,18 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         self.canvas = canvas
         self.encoderSettings = parameters
         let sizeChanged = previous == nil || previous!.width != canvas.width || previous!.height != canvas.height
+        var retired: H264Encoder?
         if sizeChanged {
-            encoder?.invalidate()
+            retired = encoder
             encoder = nil
             waitingForIDR = true
             decoderNeedsKeyframe = true
             decoderWaitingSince = Date()
         }
         lock.unlock()
+        // Outside the lock: invalidate waits for the encoder's in-flight frame, and the callback that
+        // completes it needs this same lock.
+        retired?.invalidate()
 
         log?("CFMOTO canvas \(canvas.width)x\(canvas.height) (dash asked \(canvas.requestedWidth)x\(canvas.requestedHeight)) " +
              "bitrate=\(parameters.bitrate) fps=\(parameters.frameRate)")
@@ -181,13 +185,16 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// stayed false, so nothing ever rebuilt it).
     func resynchronize() {
         lock.lock()
-        decoder?.invalidate()
+        let retired = decoder
         decoder = nil
         decodeBox = DecodeBox()
         waitingForIDR = true
         decoderNeedsKeyframe = true
         decoderWaitingSince = Date()
         lock.unlock()
+        // Outside the lock: invalidate waits for the decoder to drain, and the frame callbacks it
+        // waits on take this lock.
+        retired?.invalidate()
         queue.invalidateKeyframe()
         queue.resynchronize()
         onKeyframeRequest?()
@@ -278,9 +285,15 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         patternTask?.cancel(); patternTask = nil
         lock.lock()
         stopped = true
-        decoder?.invalidate(); decoder = nil
-        encoder?.invalidate(); encoder = nil
+        let oldDecoder = decoder; decoder = nil
+        let oldEncoder = encoder; encoder = nil
         lock.unlock()
+        // Invalidate OUTSIDE the lock. VTCompressionSessionInvalidate waits for the in-flight frame,
+        // and the callback that finishes it stores the result under this same lock - so invalidating
+        // while holding it deadlocks. shutdown() runs on the receiver's serial queue, so that
+        // deadlock wedged every later start: no listener, no CarPlay session, nothing in the log.
+        oldDecoder?.invalidate()
+        oldEncoder?.invalidate()
         queue.close()
     }
 
@@ -390,7 +403,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                     output: { freshBox.set(image: $0) },
                     failure: { freshBox.set(error: $0) })
                 lock.lock()
-                decoder?.invalidate()
+                let previousDecoder = decoder
                 decoder = rebuilt
                 decodeBox = freshBox
                 decoderNeedsKeyframe = false
@@ -399,6 +412,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 // too: the dash's decoder is being rebuilt from the same stream.
                 waitingForIDR = true
                 lock.unlock()
+                previousDecoder?.invalidate()
             }
             guard let decoder else {
                 lock.lock(); dropNoDecoder += 1; lock.unlock()
@@ -437,10 +451,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             return nil
         } catch {
             lock.lock()
-            decoder?.invalidate()
+            let broken = decoder
             decoder = nil
             waitingForIDR = true
             lock.unlock()
+            broken?.invalidate()
             lastCodecFailure = ProcessInfo.processInfo.systemUptime
             lock.lock(); decodeErrors += 1; lock.unlock()
             diagnose("decode failed: \(error.localizedDescription)")
@@ -513,10 +528,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             return nil
         } catch {
             lock.lock()
-            encoder?.invalidate()
+            let broken = encoder
             encoder = nil
             waitingForIDR = true
             lock.unlock()
+            broken?.invalidate()
             lastCodecFailure = ProcessInfo.processInfo.systemUptime
             diagnose("encode failed: \(error.localizedDescription)")
             return nil
