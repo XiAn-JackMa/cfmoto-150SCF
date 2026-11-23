@@ -141,6 +141,25 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// the bitrate shown on screen has to be what is actually being sent now, not since the session
     /// started, which is what the cumulative counters would give.
     private var servedWindow: [(at: TimeInterval, bytes: Int)] = []
+
+    /// A second encoder that compresses the still picture at a low bitrate, used to answer idle
+    /// pulls when that is enabled. Separate from the main encoder so its rate control is never
+    /// disturbed: the main one keeps producing full-quality frames the moment anything moves.
+    private var padEncoder: H264Encoder?
+    private var padCanvasKey = ""
+    private var padEncodedResult: Result<H264EncodedFrame, Error>?
+    /// Serialises pad encodes. The pad path is on the pull thread and must not block the main
+    /// encode lock, which the work queue needs.
+    private let padLock = NSLock()
+    /// The pad access unit, valid only while the picture has not changed since it was made.
+    private var padKeyframeAU: Data?
+    private var padGeneration = -1
+    /// Bumped for every freshly decoded picture, so a cached pad can be checked for staleness.
+    private var pictureGeneration = 0
+    private var padCount = 0
+    /// Cached copy of CfMotoTuning.staticPadEnabled: the pull path runs 20 times a second and a
+    /// UserDefaults read per pull is not free. Refreshed whenever the tuning is applied.
+    private var staticPadOn = false
     /// Cumulative bytes and keyframes handed to the dash, for the average frame size and IDR share.
     private var servedBytes = 0
     private var servedKeyframes = 0
@@ -187,7 +206,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             "重新压缩 \(encodedCount) 帧",
             "车机索要 \(pulls) 次",
             "成功交付 \(servedCount) 帧",
-            "其中重复上一帧 \(repeatedCount) 次"
+            (padCount > 0 ? "其中重复上一帧 \(repeatedCount) 次（轻量补帧 \(padCount) 次）" : "其中重复上一帧 \(repeatedCount) 次"),
         ]
         var problems: [String] = []
         if dropWaitingIDR > 0 { problems.append("等关键帧丢了 \(dropWaitingIDR)") }
@@ -221,8 +240,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         encoder = nil
         waitingForIDR = true
         encoderSettings = CfMotoVideoSource.tuned(encoderSettings)
+        let stalePadForTuning = padEncoder
+        staticPadOn = CfMotoTuning.staticPadEnabled
+        padEncoder = nil; padCanvasKey = ""; padKeyframeAU = nil; padGeneration = -1
         lock.unlock()
         old?.invalidate()
+        stalePadForTuning?.invalidate()
         log?("CFMOTO 画面参数已应用：\(CfMotoTuning.summary)（编码器已重建）")
     }
 
@@ -238,6 +261,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         let previous = self.canvas
         self.canvas = canvas
         self.encoderSettings = CfMotoVideoSource.tuned(parameters)
+        self.staticPadOn = CfMotoTuning.staticPadEnabled
         let sizeChanged = previous == nil || previous!.width != canvas.width || previous!.height != canvas.height
         var retired: H264Encoder?
         if sizeChanged {
@@ -264,6 +288,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             // A keyframe of the previous canvas must never answer a pull for this one: a cached
             // access unit from the old size would decode as garbage on the dash.
             lock.lock(); fittedBuffer = nil; lastKeyframeAU = nil; lock.unlock()
+            lock.lock()
+            let stalePad = padEncoder
+            padEncoder = nil; padCanvasKey = ""; padKeyframeAU = nil; padGeneration = -1
+            lock.unlock()
+            stalePad?.invalidate()
             queue.invalidateKeyframe()
             queue.resynchronize()
         }
@@ -279,6 +308,97 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         }
         // After the queue reset above, so the pattern's first keyframe is not flushed by it.
         startPatternIfNeeded()
+    }
+
+    /// A cheap access unit for an idle pull: the still picture re-compressed at a low bitrate.
+    ///
+    /// A static screen means no fresh picture, and the link still wants an answer twenty times a
+    /// second, so the full-quality keyframe goes out twenty times - 63 KB each at 6 Mbit/s, about
+    /// 10 Mbit/s for a screen that is not moving. Compressing that same still at a quarter of the
+    /// bitrate makes the repeat roughly six times cheaper. The picture softens, which is why the
+    /// rider turns this on deliberately.
+    ///
+    /// Returns nil when a pad cannot be produced, so the caller falls back to the full-quality
+    /// cached keyframe.
+    private func staticPadAccessUnit(_ image: CVPixelBuffer, canvas: VideoCanvas) -> Data? {
+        let generation = lock.withLock { pictureGeneration }
+        if lock.withLock({ padGeneration == generation }), let cached = lock.withLock({ padKeyframeAU }) {
+            return cached
+        }
+        padLock.lock()
+        defer { padLock.unlock() }
+        // Another pull may have produced it while this one waited.
+        if lock.withLock({ padGeneration == generation }), let cached = lock.withLock({ padKeyframeAU }) {
+            return cached
+        }
+        let key = "\(canvas.width)x\(canvas.height)"
+        lock.lock()
+        var retiredPad: H264Encoder?
+        if padEncoder == nil || padCanvasKey != key {
+            // Take it out of the field under the lock, invalidate it after releasing: its callback
+            // stores the result under this same lock, so invalidating while holding it would hang
+            // exactly the way the main encoder used to.
+            retiredPad = padEncoder
+            padEncoder = nil
+            do {
+                padEncoder = try H264Encoder(
+                    width: canvas.width, height: canvas.height,
+                    fps: encoderSettings.frameRate, bitrate: CfMotoTuning.staticPadBitrate,
+                    profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .auto
+                ) { [weak self] outcome in
+                    guard let self else { return }
+                    self.lock.lock(); self.padEncodedResult = outcome; self.lock.unlock()
+                }
+                padCanvasKey = key
+            } catch {
+                padEncoder = nil
+                lock.unlock()
+                retiredPad?.invalidate()
+                log?("静止补帧：低码率编码器建不起来，改用正常关键帧（\(error.localizedDescription)）")
+                return nil
+            }
+        }
+        padEncodedResult = nil
+        let encoder = padEncoder
+        lock.unlock()
+        retiredPad?.invalidate()
+        guard let encoder else { return nil }
+        do {
+            try encoder.encode(image,
+                               presentationTime: CMTime(seconds: ProcessInfo.processInfo.systemUptime,
+                                                        preferredTimescale: 1_000_000),
+                               forceKeyframe: true)
+            encoder.complete()
+            var outcome: Result<H264EncodedFrame, Error>?
+            let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+            repeat {
+                outcome = lock.withLock { padEncodedResult }
+                if outcome != nil { break }
+            } while ProcessInfo.processInfo.systemUptime < deadline
+            lock.lock(); padEncodedResult = nil; lock.unlock()
+            guard let frame = try outcome?.get() else { return nil }
+            lock.lock()
+            padKeyframeAU = frame.data
+            padGeneration = generation
+            padCount += 1
+            let fullSize = lastKeyframeAU?.count ?? 0
+            lock.unlock()
+            // Once per new picture: this is the line that says what the option actually costs.
+            log?("静止补帧：轻量包 \(frame.data.count / 1024) KB" +
+                 (fullSize > 0 ? "（正常关键帧 \(fullSize / 1024) KB）" : "") +
+                 String(format: " · 补帧码率 %.1f Mbps", CfMotoTuning.staticPadMbps))
+            return frame.data
+        } catch {
+            lock.lock()
+            let brokenPad = padEncoder
+            padEncoder = nil
+            padCanvasKey = ""
+            padGeneration = -1
+            lock.unlock()
+            brokenPad?.invalidate()
+            log?("静止补帧失败，改用正常关键帧：\(error.localizedDescription)")
+            return nil
+        }
     }
 
     /// Asks CarPlay for a keyframe, unless the app is backgrounded where nothing can answer.
@@ -301,10 +421,13 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         guard changed else { return }
         lock.lock()
         let retired = value ? encoder : nil
+        let retiredPad = value ? padEncoder : nil
+        if value { padEncoder = nil; padCanvasKey = ""; padKeyframeAU = nil; padGeneration = -1 }
         if value { encoder = nil; waitingForIDR = true }
         lock.unlock()
         guard let retired else { return }
         retired.invalidate()
+        retiredPad?.invalidate()
         log?("App 进入后台：已释放编码器，下次需要时自动重建")
     }
 
@@ -350,6 +473,20 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // Only reuse the cache when the frame already sent *was* a keyframe: then the cache and the
         // current picture agree. If the last frame was a P, the cached IDR is older than the picture
         // in hand, and resending it is how the progress bar walked backwards (52 s, 51 s, 52 s).
+        if !dirty, staticPadOn, let prepared, let canvas,
+           let pad = staticPadAccessUnit(prepared, canvas: canvas) {
+            // The still picture, re-compressed small: same content, a fraction of the bytes.
+            lock.lock()
+            servedCount += 1; repeatedCount += 1
+            noteServed(pad.count, keyframe: true)
+            sequence &+= 1
+            let seq = sequence
+            lock.unlock()
+            if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter { requestKeyframeIfUseful() }
+            return EncodedFrame(accessUnit: pad, isKeyframe: true,
+                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
+        }
+
         if !dirty, cacheIsCurrent, let keyframe = cachedKeyframe {
             // The picture has not changed since the last encode, so the cached IDR is exactly what
             // the dash should see; re-encoding identical content risks a byte-identical P-frame.
@@ -432,6 +569,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         stopped = true
         let oldDecoder = decoder; decoder = nil
         let oldEncoder = encoder; encoder = nil
+        let oldPad = padEncoder; padEncoder = nil
+        padEncodedResult = nil; padKeyframeAU = nil; padGeneration = -1
         lock.unlock()
         // Invalidate OUTSIDE the lock. VTCompressionSessionInvalidate waits for the in-flight frame,
         // and the callback that finishes it stores the result under this same lock - so invalidating
@@ -439,6 +578,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // deadlock wedged every later start: no listener, no CarPlay session, nothing in the log.
         oldDecoder?.invalidate()
         oldEncoder?.invalidate()
+        oldPad?.invalidate()
         queue.close()
     }
 
@@ -486,7 +626,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // several times a second; FrameQueue's overflow policy flushes and closes its keyframe gate,
         // which left the queue empty and gated essentially always (measured: 100% of pulls were
         // padded, not one queued frame ever served).
-        lock.lock(); fittedBuffer = prepared; pictureDirty = true; lock.unlock()
+        lock.lock(); fittedBuffer = prepared; pictureDirty = true; pictureGeneration += 1; lock.unlock()
     }
 
 
@@ -858,6 +998,7 @@ extension CfMotoVideoSource {
         decodedCount += 1
         fittedBuffer = buffer
         pictureDirty = true
+        pictureGeneration += 1
         lock.unlock()
     }
 

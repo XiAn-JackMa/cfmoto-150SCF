@@ -302,6 +302,9 @@ final class CfMotoOutput {
             (s.scaleText == "1:1" ? "尺寸一致，不缩放" : "缩放 \(s.scaleText)（画面会变糊）") +
             String(format: " · 每秒送 %.1f 帧 · 重复画面 %.0f%% · 关键帧 %.0f%% · 每帧 %.1f KB · 约 %.1f Mbps",
                    s.servedFPS, s.paddedRatio * 100, s.keyframeRatio * 100, s.averageFrameKB, s.bitrateMbps)
+        if CfMotoTuning.staticPadEnabled {
+            text += String(format: " · 静止补帧已开 %.1f Mbps", CfMotoTuning.staticPadMbps)
+        }
         log(text)
     }
     /// Reports a CarPlay silence, but only when there is genuinely no picture.

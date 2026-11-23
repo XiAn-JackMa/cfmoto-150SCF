@@ -49,6 +49,27 @@ enum CfMotoTuning {
     // MARK: Profile
 
     /// Baseline@3.1 keeps old dash decoders happy. Turning it off lets VideoToolbox pick a higher
+    // MARK: Static picture
+
+    /// Answer an idle pull with a smaller keyframe instead of the full-quality one.
+    ///
+    /// A dash that pulls 20 times a second while the picture is static gets the same keyframe
+    /// replayed 20 times, so the wire carries pull-rate x keyframe-size: 63 KB at 6 Mbit/s is
+    /// about 10 Mbit/s for a screen that is not even changing. Re-encoding that still picture at
+    /// a quarter of the bitrate makes the repeat six times cheaper, at the cost of a softer still
+    /// image - which is exactly the picture a rider reads, so it is off by default.
+    static var staticPadEnabled: Bool {
+        get { defaults.object(forKey: Key.staticPad) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: Key.staticPad) }
+    }
+
+    /// Bitrate used for those pads, as a share of the configured one.
+    static var staticPadBitrate: Int {
+        max(600_000, Int(bitrateMbps * 1_000_000 * 0.25))
+    }
+
+    static var staticPadMbps: Double { Double(staticPadBitrate) / 1_000_000 }
+
     /// level, which is only worth trying when a dash refuses the stream.
     static var forceBaseline: Bool {
         get { defaults.object(forKey: Key.baseline) as? Bool ?? true }
@@ -87,11 +108,12 @@ enum CfMotoTuning {
 
     /// One line for the log and the settings screen.
     static var summary: String {
-        String(format: "%.1f Mbps · %d fps · 关键帧 %.1f 秒 · %@ · 等待画布 %.0f 秒%@",
-               bitrateMbps, frameRate, keyframeSeconds,
-               forceBaseline ? "Baseline 3.1" : "自动 profile",
-               canvasWaitSeconds,
-               canvasOverrideSize.map { " · 固定画布 \($0.width)×\($0.height)" } ?? "")
+        let extras = canvasOverrideSize.map { " · 固定画布 \($0.width)×\($0.height)" } ?? ""
+        let pad = staticPadEnabled ? String(format: " · 静止补帧 %.1f Mbps", staticPadMbps) : ""
+        return String(format: "%.1f Mbps · %d fps · 关键帧 %.1f 秒 · %@ · 等待画布 %.0f 秒",
+                      bitrateMbps, frameRate, keyframeSeconds,
+                      forceBaseline ? "Baseline 3.1" : "自动 profile",
+                      canvasWaitSeconds) + extras + pad
     }
 
     static func reset() {
@@ -110,7 +132,8 @@ enum CfMotoTuning {
         static let baseline = "cfmotoTuningBaseline"
         static let canvasWait = "cfmotoTuningCanvasWait"
         static let canvasOverride = "cfmotoTuningCanvasOverride"
-        static let all = [bitrate, frameRate, keyframe, baseline, canvasWait, canvasOverride]
+        static let staticPad = "cfmotoTuningStaticPad"
+        static let all = [bitrate, frameRate, keyframe, baseline, canvasWait, canvasOverride, staticPad]
     }
 
     private enum Field { case bitrate, frameRate, keyframe, baseline, canvasWait }
