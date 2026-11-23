@@ -8,6 +8,11 @@ final class NativeReceiver {
     /// Fires if a fresh listener has not reached .ready: binding can stall without ever
     /// reporting .failed, and then onReady is never called and the UI waits for ever.
     private var readyDeadline: DispatchWorkItem?
+    /// Last /feedback seen. The iPhone sends it every two seconds for the whole session; a gap is
+    /// the one reliable sign that a connected CarPlay session has actually stopped, as opposed to
+    /// merely having nothing new to draw.
+    private var lastFeedbackAt: Date?
+    private var feedbackCount = 0
     private var connections: [UUID: NWConnection] = [:]
     private var sessions: [UUID: SessionState] = [:]
     /// Access units handed to the main thread but not yet consumed. Over the limit, the local
@@ -319,6 +324,18 @@ final class NativeReceiver {
             } else { fail("无法创建监听器：\(error.localizedDescription)") }
         } catch { fail("无法创建监听器：\(error)") }
     }
+    private func noteFeedback() {
+        let now = Date()
+        if let last = lastFeedbackAt {
+            let gap = now.timeIntervalSince(last)
+            if gap > 6 { log("[警告] CarPlay 心跳中断 \(Int(gap)) 秒后恢复（/feedback）") }
+        } else {
+            log("CarPlay 心跳已建立：iPhone 每 2 秒发一次 /feedback")
+        }
+        lastFeedbackAt = now
+        feedbackCount += 1
+    }
+
     private func fail(_ message: String) {
         log(message); stopOnQueue()
         DispatchQueue.main.async { [weak self] in self?.onFailure?() }
@@ -460,7 +477,10 @@ final class NativeReceiver {
                     while true {
                         let plaintext = try state.cipher?.receive(input) ?? input
                         guard let request = try state.parser.append(plaintext, maximumRequests: 1).first else { break }
-                        self.log("\(request.method) \(request.target.prefix(100)) [\(request.body.count) 字节]")
+                        // /feedback 每 2 秒一次，单独处理（见 noteFeedback），否则一小时 1800 行噪音。
+                        if request.target != "/feedback" {
+                            self.log("\(request.method) \(request.target.prefix(100)) [\(request.body.count) 字节]")
+                        }
                         let response = try self.respond(request, state: state, configuration: configuration, identity: identity)
                         let encoded = response.encoded(for: request)
                         let wire = try state.cipher?.encrypt(encoded) ?? encoded
@@ -572,6 +592,7 @@ final class NativeReceiver {
             log("已生成 MFiSAP 响应，正在等待 iPhone 接受")
             return RTSPResponse(body: body)
         case ("POST", "/feedback"):
+            noteFeedback()
             if let feedback = try state.media?.feedback() {
                 return RTSPResponse(body: feedback, contentType: "application/x-apple-binary-plist")
             }
