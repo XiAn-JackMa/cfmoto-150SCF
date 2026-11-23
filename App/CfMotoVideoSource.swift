@@ -33,6 +33,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Last keyframe access unit, resent when a pull finds nothing new: no encoding, and a dash
     /// that lost its reference frames can always resume on it.
     private var lastKeyframeAU: Data?
+    /// Last access unit that encoded successfully, of any kind. The pull path answers with it rather
+    /// than returning nothing: a lock-step link treats an empty reply as a dead one.
+    private var lastEncodedAU: Data?
+    private var lastEncodedWasKeyframe = false
     /// Synthetic colour-bar source: validates the whole EasyConn path (canvas, encoder, framing,
     /// pulls, repeats) without waiting for CarPlay, on the bench or on the bike.
     var testPattern = false
@@ -125,8 +129,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         log?("CFMOTO canvas \(canvas.width)x\(canvas.height) (dash asked \(canvas.requestedWidth)x\(canvas.requestedHeight)) " +
              "bitrate=\(parameters.bitrate) fps=\(parameters.frameRate)")
         if sizeChanged {
-            // A keyframe of the previous canvas must never answer a pull for this one.
-            lock.lock(); fittedBuffer = nil; lock.unlock()
+            // A keyframe of the previous canvas must never answer a pull for this one: a cached
+            // access unit from the old size would decode as garbage on the dash.
+            lock.lock(); fittedBuffer = nil; lastEncodedAU = nil; lastKeyframeAU = nil; lock.unlock()
             queue.invalidateKeyframe()
             queue.resynchronize()
         }
@@ -171,8 +176,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         let canvas = self.canvas
         lock.unlock()
         if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter {
-            diagnose("等关键帧超时（\(Int(Date().timeIntervalSince(since)))s），不重发旧画面，等车机重连")
-            return nil
+            // Still answer: this link is lock-step (one pull, one frame), so returning nothing makes
+            // the dash wait for a reply that never comes, and nine seconds later it drops the media
+            // link. Falling through to the cached access unit keeps the session alive while the
+            // keyframe request below keeps asking CarPlay for a fresh one.
+            diagnose("等关键帧 \(Int(Date().timeIntervalSince(since)))s，先用缓存帧维持会话")
+            onKeyframeRequest?()
         }
         if let prepared, let canvas, let frame = encode(prepared, canvas: canvas) {
             lock.lock()
@@ -183,10 +192,23 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             return EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
                                 presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
         }
-        // No picture has been decoded yet: fall back to the keyframe, if any.
+        // Encoding is unavailable right now (session being rebuilt, or CarPlay has not produced a
+        // picture yet). Answer with the last access unit that did encode: a slightly old picture is
+        // far better than stalling a lock-step link.
         lock.lock()
+        let cached = lastEncodedAU
+        let cachedIsKeyframe = lastEncodedWasKeyframe
         let keyframe = lastKeyframeAU
         lock.unlock()
+        if let cached {
+            lock.lock()
+            servedCount += 1; repeatedCount += 1
+            sequence &+= 1
+            let seq = sequence
+            lock.unlock()
+            return EncodedFrame(accessUnit: cached, isKeyframe: cachedIsKeyframe,
+                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
+        }
         if let keyframe {
             lock.lock()
             servedCount += 1; repeatedCount += 1
@@ -198,11 +220,13 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         }
 
         // No picture has ever been encoded (CarPlay has not produced anything yet): let it miss.
+        // This empties the dash's reply slot, so it must stay rare - the log says when it happens.
         let remaining = max(0, timeout - 0.025)
         if remaining > 0, let frame = await queue.next(timeout: remaining) {
             lock.lock(); servedCount += 1; lock.unlock()
             return frame
         }
+        diagnose("无任何可发画面（CarPlay 尚未产出），本次拉帧回空")
         return nil
     }
 
@@ -414,9 +438,16 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             }
             lock.lock(); encodedResult = nil; lock.unlock()
             let frame = try outcome?.get()
-            if let frame, frame.isKeyframe {
-                lastKeyframe = now
-                lock.lock(); lastKeyframeAU = frame.data; waitingForIDR = false; lock.unlock()
+            if let frame {
+                lock.lock()
+                lastEncodedAU = frame.data
+                lastEncodedWasKeyframe = frame.isKeyframe
+                if frame.isKeyframe {
+                    lastKeyframe = now
+                    lastKeyframeAU = frame.data
+                    waitingForIDR = false
+                }
+                lock.unlock()
             }
             return frame
         } catch H264EncoderError.frameDropped {
