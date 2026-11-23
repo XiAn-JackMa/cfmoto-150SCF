@@ -1780,11 +1780,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private func adoptCfMotoCanvas(_ canvas: VideoCanvas) {
         guard running, outputMode.isEasyConn else { return }
         let size = "\(canvas.width)x\(canvas.height)"
-        guard liveDisplay.width != canvas.width || liveDisplay.height != canvas.height else { return }
+        let current = liveDisplay
+        guard current?.width != canvas.width || current?.height != canvas.height else { return }
         guard canvasRestartedFor != size else { return }
         canvasRestartedFor = size
         UserDefaults.standard.set(size, forKey: "cfmotoCanvas")
-        log("车机画布为 \(size)，当前渲染 \(liveDisplay.width)×\(liveDisplay.height)，按车机尺寸重启 CarPlay")
+        let currentText = current.map { "\($0.width)×\($0.height)" } ?? "未知"
+        log("车机画布为 \(size)，当前渲染 \(currentText)，按车机尺寸重启 CarPlay")
         restartCarPlay(reason: "车机画布 \(size)")
     }
 
