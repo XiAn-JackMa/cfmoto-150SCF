@@ -37,6 +37,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// yield byte-identical P-frames, which §15.2 forbids (re-applying one corrupts the picture),
     /// so an unchanged picture is answered with the cached IDR instead.
     private var pictureDirty = true
+    /// Whether the last access unit handed to the dash was a keyframe. Only a keyframe may be sent
+    /// again, so this decides whether an unchanged picture can be answered from the cache.
+    private var lastServedWasKeyframe = false
+    /// Last time CarPlay handed us a picture. A long silence means the black frames the dash is
+    /// seeing come from CarPlay, not from the EasyConn output, and the log should say so.
+    private var lastInboundAt = Date.distantPast
 
     /// Synthetic colour-bar source: validates the whole EasyConn path (canvas, encoder, framing,
     /// pulls, repeats) without waiting for CarPlay, on the bench or on the bike.
@@ -103,6 +109,13 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         guard now - lastDiagnostic >= 2 else { return }
         lastDiagnostic = now
         log?("CFMOTO \(message())")
+    }
+
+    /// Seconds since CarPlay last produced a picture (large values mean CarPlay itself is silent).
+    var inboundIdle: TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        guard inbound > 0 else { return Date().timeIntervalSince(lastInboundAt) }
+        return Date().timeIntervalSince(lastInboundAt)
     }
 
     var counters: String {
@@ -191,8 +204,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // only adds staleness and overflow. Nothing to encode yet means CarPlay has not produced a
         // picture at all, which only happens in the first moments of a session.
         let dirty = lock.withLock { pictureDirty }
+        let cacheIsCurrent = lock.withLock { lastServedWasKeyframe }
         let cachedKeyframe = lock.withLock { lastKeyframeAU }
-        if !dirty, let keyframe = cachedKeyframe {
+        // Only reuse the cache when the frame already sent *was* a keyframe: then the cache and the
+        // current picture agree. If the last frame was a P, the cached IDR is older than the picture
+        // in hand, and resending it is how the progress bar walked backwards (52 s, 51 s, 52 s).
+        if !dirty, cacheIsCurrent, let keyframe = cachedKeyframe {
             // The picture has not changed since the last encode, so the cached IDR is exactly what
             // the dash should see; re-encoding identical content risks a byte-identical P-frame.
             lock.lock()
@@ -211,11 +228,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 diagnose("等关键帧 \(Int(Date().timeIntervalSince(since)))s，先用当前画面维持会话")
                 onKeyframeRequest?()
             }
-            if let frame = encode(prepared, canvas: canvas) {
+            if let frame = encode(prepared, canvas: canvas, force: !dirty) {
                 lock.lock()
                 servedCount += 1
                 encodedCount += 1
                 pictureDirty = false
+                lastServedWasKeyframe = frame.isKeyframe
                 sequence &+= 1
                 let seq = sequence
                 lock.unlock()
@@ -274,7 +292,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             lock.lock(); nonH264 += 1; lock.unlock()
             return
         }
-        lock.lock(); inbound += 1; lock.unlock()
+        lock.lock(); inbound += 1; lastInboundAt = Date(); lock.unlock()
         lock.lock()
         let reject = stopped || pending >= 6
         if reject { skipping = !skipping }

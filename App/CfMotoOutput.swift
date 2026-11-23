@@ -186,7 +186,15 @@ final class CfMotoOutput {
                 } else {
                     self.log("[车机] 尚无数据 状态=\(state.replacingOccurrences(of: "[状态] ", with: ""))")
                 }
-                self.log("[管道] \(self.source.counters)")
+                let idle = self.source.inboundIdle
+                if idle > 5 {
+                    // The dash is showing black because CarPlay has not produced a picture; that is
+                    // a CarPlay session problem, not an EasyConn one, and saying so saves a lot of
+                    // guessing at the bike.
+                    self.log("[管道] CarPlay 已 \(Int(idle)) 秒没有出画面 —— 车机看到的是黑屏，问题在 CarPlay 会话，不在投屏")
+                } else {
+                    self.log("[管道] \(self.source.counters)")
+                }
                 // Counters go to the log view only. Raising the status label here would rebuild the
                 // settings table every few seconds, which fights the log field the rider is reading.
             }
