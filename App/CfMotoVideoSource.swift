@@ -324,16 +324,40 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                     picture.append(unit)
                 }
             }
-            let needsRebuild = lock.withLock { waitingForIDR }
+            // A missing decoder must always mean "rebuild needed". The field log showed the two can
+            // disagree (decoder nil while waitingForIDR was false), and then the rebuild branch is
+            // skipped for every frame: 2579 frames were counted as "no decoder" and the dash stayed
+            // frozen on the last cached picture with the link healthy.
+            lock.lock()
+            if decoder == nil, !waitingForIDR {
+                waitingForIDR = true
+                if waitingSince == .distantPast { waitingSince = Date() }
+            }
+            let needsRebuild = waitingForIDR
+            let waitedLong = Date().timeIntervalSince(waitingSince)
+            lock.unlock()
+
             if needsRebuild {
-                guard parameters.isComplete, keyframe, !picture.isEmpty else {
+                guard parameters.isComplete, !picture.isEmpty else {
                     lock.lock(); dropWaitingIDR += 1; lock.unlock()
+                    return nil
+                }
+                // Normally a rebuild waits for a keyframe. But if none arrives for this long, build
+                // anyway and feed what we have: one garbled frame that the next frame repairs beats
+                // a dash frozen until the rider restarts the app.
+                let forceWithoutKeyframe = !keyframe && waitedLong > 3.0
+                guard keyframe || forceWithoutKeyframe else {
+                    lock.lock(); dropWaitingIDR += 1; lock.unlock()
+                    onKeyframeRequest?()
                     return nil
                 }
                 guard ProcessInfo.processInfo.systemUptime - lastCodecFailure >= 0.5 else {
                     lock.lock(); dropCooldown += 1; lock.unlock()
                     onKeyframeRequest?()
                     return nil
+                }
+                if forceWithoutKeyframe {
+                    diagnose("等关键帧 \(Int(waitedLong))s，用非关键帧强行重建解码器")
                 }
                 // Build outside the lock: a throwing initialiser must not leave it held.
                 let freshBox = DecodeBox()
@@ -350,6 +374,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             }
             guard let decoder else {
                 lock.lock(); dropNoDecoder += 1; lock.unlock()
+                onKeyframeRequest?()
+                diagnose("解码器缺失，已请求关键帧（本帧丢弃）")
                 return nil
             }
             guard !picture.isEmpty else {
