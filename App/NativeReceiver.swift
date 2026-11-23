@@ -5,6 +5,9 @@ import Network
 final class NativeReceiver {
     private let queue = DispatchQueue(label: "TDSCarKit.receiver")
     private var listener: NWListener?
+    /// Fires if a fresh listener has not reached .ready: binding can stall without ever
+    /// reporting .failed, and then onReady is never called and the UI waits for ever.
+    private var readyDeadline: DispatchWorkItem?
     private var connections: [UUID: NWConnection] = [:]
     private var sessions: [UUID: SessionState] = [:]
     /// Access units handed to the main thread but not yet consumed. Over the limit, the local
@@ -217,6 +220,7 @@ final class NativeReceiver {
                 case .ready:
                     guard let actualPort = candidate.port?.rawValue else { self.fail("监听器未获得端口"); return }
                     self.log("原生 RTSP 监听器已在端口 \(actualPort) 就绪")
+                    self.readyDeadline?.cancel(); self.readyDeadline = nil
                     let advertiseDiscovery = self.airPlayIdentity != nil
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
@@ -236,9 +240,38 @@ final class NativeReceiver {
                         candidate.cancel(); self.listener = nil
                         self.listen(configuration: configuration, identity: identity, port: nil, onReady: onReady)
                     } else { self.fail("监听器失败：\(error.localizedDescription)") }
-                default: break
+                case .waiting(let error):
+                    // A listener that cannot bind reports .waiting, not .failed, and never becomes
+                    // .ready on its own. Swallowing it left onReady uncalled, so sameDevice.start
+                    // never ran and the app sat on "正在启动本机 CarPlay" with nothing in the log -
+                    // which is exactly what a port still held by the previous session looks like.
+                    self.log("监听器等待中：\(error.localizedDescription)")
+                    if port != nil, case .posix(.EADDRINUSE) = error {
+                        self.log("端口 \(port!) 仍被占用，改用任意端口")
+                        candidate.cancel(); self.listener = nil
+                        self.listen(configuration: configuration, identity: identity, port: nil, onReady: onReady)
+                    }
+                case .cancelled, .setup:
+                    break
                 }
             }
+            // Binding can stall without ever reporting .failed - typically while the previous
+            // listener still holds the port. Give it five seconds, then fall back to any port, so a
+            // start can never sit on "正在启动本机 CarPlay" for ever.
+            readyDeadline?.cancel()
+            let deadline = DispatchWorkItem { [weak self, weak candidate] in
+                guard let self, let candidate, self.listener === candidate,
+                      self.generation == generation else { return }
+                self.log("监听器 5 秒未就绪（端口可能仍被占用）")
+                candidate.cancel(); self.listener = nil
+                if port != nil {
+                    self.listen(configuration: configuration, identity: identity, port: nil, onReady: onReady)
+                } else {
+                    self.fail("监听器 5 秒未就绪，无法启动")
+                }
+            }
+            readyDeadline = deadline
+            queue.asyncAfter(deadline: .now() + 5, execute: deadline)
             candidate.newConnectionHandler = { [weak self, weak candidate] connection in
                 guard let self, self.generation == generation, self.listener === candidate,
                       self.connections.count < 8 else { connection.cancel(); return }
@@ -356,6 +389,7 @@ final class NativeReceiver {
     }
     private func stopOnQueue() {
         DispatchQueue.main.async { [weak self] in self?.discoveryService?.stop(); self?.discoveryService = nil }
+        readyDeadline?.cancel(); readyDeadline = nil
         generation = UUID(); listener?.cancel(); listener = nil
         videoOutput.stop()
         carLife.stop()
