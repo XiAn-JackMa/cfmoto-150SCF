@@ -424,7 +424,6 @@ final class NativeReceiver {
     }
     private func stopOnQueue() {
         log("接收器：停止开始")
-        log("接收器：停止开始")
         // The heartbeat belongs to one CarPlay session; without this the gap across a stop/start
         // was reported as a 30-plus second "heartbeat lost".
         lastFeedbackAt = nil

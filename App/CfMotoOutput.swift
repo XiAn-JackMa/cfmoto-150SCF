@@ -58,6 +58,8 @@ final class CfMotoOutput {
     let store = CfMotoLogStore()
     /// Latest link statistics, so the periodic line carries the dash's own view.
     private var lastStats: LinkStats?
+    /// Last numbers written to the log, so the ticker does not repeat an unchanged snapshot.
+    private var lastStatsSignature = ""
 
     /// One line to both the store (persistent) and whoever shows it (settings screen, :10950).
     private func log(_ line: String) {
@@ -215,9 +217,16 @@ final class CfMotoOutput {
                 guard let self, self.lock.withLock({ self.link != nil }) else { return }
                 let (state, stats) = self.lock.withLock { (self.lastState, self.lastStats) }
                 if let stats {
-                    self.log("[车机] 已交付 \(stats.framesSent) 帧 · 其中关键帧 \(stats.keyframesSent) · 约 \(stats.bytesSent / 1024) KB" +
-                        " · 车机没等到回复 \(stats.missedPulls) 次 · 每秒 \(String(format: "%.1f", stats.pullRate)) 次" +
-                        " · 状态：\(state.replacingOccurrences(of: "[状态] ", with: ""))")
+                    // The link publishes stats less often than this ticker runs, so an unchanged
+                    // snapshot printed the same numbers every three seconds. Only speak on change.
+                    let signature = "\(stats.framesSent)/\(stats.keyframesSent)/\(stats.missedPulls)/" +
+                        String(format: "%.1f", stats.pullRate)
+                    if signature != self.lastStatsSignature {
+                        self.lastStatsSignature = signature
+                        self.log("[车机] 已交付 \(stats.framesSent) 帧 · 其中关键帧 \(stats.keyframesSent) · 约 \(stats.bytesSent / 1024) KB" +
+                            " · 车机没等到回复 \(stats.missedPulls) 次 · 每秒 \(String(format: "%.1f", stats.pullRate)) 次" +
+                            " · 状态：\(state.replacingOccurrences(of: "[状态] ", with: ""))")
+                    }
                 } else {
                     self.log("[车机] 尚无数据 状态=\(state.replacingOccurrences(of: "[状态] ", with: ""))")
                 }

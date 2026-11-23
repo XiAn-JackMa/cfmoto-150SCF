@@ -188,7 +188,6 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         if dropNoPicture > 0 { problems.append("空画面 \(dropNoPicture)") }
         if dropNoCallback > 0 { problems.append("解码器没回应 \(dropNoCallback)") }
         if decodeErrors > 0 { problems.append("解码出错 \(decodeErrors)") }
-        if parameterSetOnly > 0 { problems.append("纯参数包 \(parameterSetOnly)（正常）") }
         if !problems.isEmpty { parts.append("异常：" + problems.joined(separator: "、")) }
         return parts.joined(separator: " · ")
     }
