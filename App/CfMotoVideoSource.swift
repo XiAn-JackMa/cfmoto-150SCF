@@ -44,6 +44,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var encoderSettings = EncoderParameters()
 
     private var waitingForIDR = true
+    /// When the decoder started waiting for a keyframe. A long wait means the link died while the
+    /// app was in the background, and repeating the last picture would freeze the dash for good.
+    private var waitingSince = Date.distantPast
+    private let idrGiveUpAfter: TimeInterval = 2.0
     private var sequence: UInt64 = 0
     private var lastCodecFailure = -Double.infinity
     private var lastKeyframe = -Double.infinity
@@ -133,6 +137,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     func resynchronize() {
         lock.lock()
         waitingForIDR = true
+        waitingSince = Date()
         lock.unlock()
         queue.resynchronize()
     }
@@ -155,10 +160,20 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         // second (129 MB in fifteen minutes in the field log). The canvas is already letterboxed, so
         // this does no CoreImage work. The encoder still emits an IDR every second, which is what a
         // dash needs to resynchronise.
+        // While the decoder is waiting for a keyframe, the picture in hand is stale: re-sending it
+        // keeps the dash showing a frozen frame that looks like a live stream, so the dash never
+        // reconnects and never re-negotiates. Once the wait is long, answer nothing instead - the
+        // dash then drops the media link, reconnects, and the fresh session asks for a keyframe.
         lock.lock()
+        let waiting = waitingForIDR
+        let since = waitingSince
         let prepared = fittedBuffer
         let canvas = self.canvas
         lock.unlock()
+        if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter {
+            diagnose("等关键帧超时（\(Int(Date().timeIntervalSince(since)))s），不重发旧画面，等车机重连")
+            return nil
+        }
         if let prepared, let canvas, let frame = encode(prepared, canvas: canvas) {
             lock.lock()
             servedCount += 1; repeatedCount += 1
@@ -278,7 +293,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 if VideoCodec.h264.parameterSet(unit) != nil {
                     sawParameterSet = true
                     if parameters.absorb(unit) {
-                        lock.lock(); waitingForIDR = true; paramSets += 1
+                        lock.lock(); waitingForIDR = true; waitingSince = Date(); paramSets += 1
                         parametersReady = parameters.isComplete; lock.unlock()
                     }
                 } else {
@@ -306,6 +321,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 decoder = rebuilt
                 decodeBox = freshBox
                 waitingForIDR = false
+                waitingSince = .distantPast
                 lock.unlock()
             }
             guard let decoder else {

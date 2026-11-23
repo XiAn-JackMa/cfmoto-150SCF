@@ -1936,6 +1936,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         guard running else { return }
         videoSurface.resumeAfterBackground(skippedFrames: skippedLocalVideo)
         skippedLocalVideo = false
+        // The EasyConn decoder loses its reference frames while the app is in the background: iOS
+        // stops feeding video, the dash keeps pulling, and the picture would freeze on the dash
+        // while the phone looks fine. Ask for a keyframe as soon as we are foreground again.
+        if outputMode.isEasyConn {
+            receiver.requestKeyFrame(reason: "回到前台，重新同步车机")
+        }
     }
     @objc private func foregrounded() {
         refreshNetworkAddresses()

@@ -328,12 +328,14 @@ final class NativeReceiver {
         keyframeLastSent = .now()
         guard media.requestKeyFrame() else { return }
         if keyframeAttempts == 1 { log("已请求关键帧（\(keyframeReason)）") }
-        guard keyframeAttempts < 8 else {
-            log("iPhone 未响应关键帧请求（已重试 \(keyframeAttempts) 次），等待自然关键帧")
-            keyframeWantedSince = nil; return
-        }
+        // Keep asking instead of giving up: this is the only way to recover without a reconnect, and
+        // it is exactly what is needed after the app returns from the background (iOS stops feeding
+        // video, the decoder loses its references, and a frozen dash looks like a live stream).
+        // The interval widens so a dash-facing session does not spam the request channel.
+        let interval: TimeInterval = keyframeAttempts < 8 ? 1 : 3
+        if keyframeAttempts == 8 { log("关键帧仍未到达，改为每 3 秒重试，直到收到为止") }
         let run = generation
-        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+        queue.asyncAfter(deadline: .now() + interval) { [weak self] in
             guard let self, self.generation == run, self.keyframeWantedSince != nil else { return }
             self.sendKeyFrameRequest()
         }
