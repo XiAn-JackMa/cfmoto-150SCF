@@ -107,10 +107,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     /// Asks CarPlay for a fresh keyframe (the dash just resynchronised its decoder).
     var onKeyframeRequest: (() -> Void)?
-
-    /// Its own lock, never `lock`: requestKeyframeIfUseful() is called from ten places, several of
-    /// them a line away from a lock/unlock pair, and re-acquiring a non-recursive NSLock deadlocks.
-    private let backgroundLock = NSLock()
+    /// When the last keyframe request went out, so a struggling decoder cannot spam the channel.
+    private var lastKeyframeRequestAt = Date.distantPast
+    /// Set while the app is backgrounded. Only used to decide that the encoder must be rebuilt: the
+    /// keyframe gate looks at whether frames are arriving, because CarPlay keeps sending while
+    /// backgrounded whenever something is actually playing or changing on screen.
     /// True while the app is backgrounded. CarPlay suspends its video there, so a keyframe request
     /// cannot be answered - each one is an encrypted write on the event channel, and a failed write
     /// closes that channel. Better not to ask at all.
@@ -433,9 +434,21 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         }
     }
 
-    /// Asks CarPlay for a keyframe, unless the app is backgrounded where nothing can answer.
+    /// Asks CarPlay for a keyframe when the request can actually be answered, at most once a second.
     private func requestKeyframeIfUseful() {
-        guard !backgroundLock.withLock({ isBackgrounded }) else { return }
+        let now = Date()
+        lock.lock()
+        // The test is "frames are still arriving", not "the app is foreground": with music playing
+        // or a screen that keeps changing, CarPlay keeps delivering while backgrounded, and a
+        // keyframe request can be answered there - it is the only way back for a decoder that iOS
+        // revoked on the way out. When nothing has arrived for five seconds the request cannot be
+        // answered, and asking anyway is a write on the event channel whose failure closes it.
+        let flowing = now.timeIntervalSince(lastInboundAt) <= 5
+        let tooSoon = now.timeIntervalSince(lastKeyframeRequestAt) < 1
+        let send = flowing && !tooSoon
+        if send { lastKeyframeRequestAt = now }
+        lock.unlock()
+        guard send else { return }
         onKeyframeRequest?()
     }
 
@@ -446,19 +459,18 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// here turns that failed encode into a clean rebuild on the next pull, which also falls back to
     /// the software encoder when the hardware one refuses to come back.
     func setBackgrounded(_ value: Bool) {
-        backgroundLock.lock()
+        lock.lock()
         let changed = isBackgrounded != value
         isBackgrounded = value
-        backgroundLock.unlock()
-        guard changed else { return }
-        lock.lock()
         let retired = value ? encoder : nil
         let retiredPad = value ? padEncoder : nil
-        if value { padEncoder = nil; padCanvasKey = ""; padKeyframeAU = nil; padGeneration = -1 }
-        if value { encoder = nil; waitingForIDR = true }
+        if value {
+            encoder = nil; waitingForIDR = true
+            padEncoder = nil; padCanvasKey = ""; padKeyframeAU = nil; padGeneration = -1
+        }
         lock.unlock()
-        guard let retired else { return }
-        retired.invalidate()
+        guard changed else { return }
+        retired?.invalidate()
         retiredPad?.invalidate()
         log?("App 进入后台：已释放编码器，下次需要时自动重建")
     }
