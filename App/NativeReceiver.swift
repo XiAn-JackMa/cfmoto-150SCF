@@ -424,6 +424,10 @@ final class NativeReceiver {
     }
     private func stopOnQueue() {
         log("接收器：停止开始")
+        log("接收器：停止开始")
+        // The heartbeat belongs to one CarPlay session; without this the gap across a stop/start
+        // was reported as a 30-plus second "heartbeat lost".
+        lastFeedbackAt = nil
         DispatchQueue.main.async { [weak self] in self?.discoveryService?.stop(); self?.discoveryService = nil }
         readyDeadline?.cancel(); readyDeadline = nil
         generation = UUID(); listener?.cancel(); listener = nil
@@ -451,9 +455,15 @@ final class NativeReceiver {
     /// Names the step a stop is in. A stop that blocks used to leave only "停止开始" behind, with no
     /// way to tell which of the eight teardowns never returned.
     private func step(_ name: String, _ body: () -> Void) {
+        // Only the start line is unconditional: it identifies the step if one ever blocks (its
+        // "完成" never arrives). A step that finishes quickly says nothing, because five of the eight
+        // outputs are not running and their stop() is a no-op - logging those made a 4 ms teardown
+        // look like heavy work.
         log("接收器：停止 → \(name)")
+        let started = ProcessInfo.processInfo.systemUptime
         body()
-        log("接收器：停止 · \(name) 完成")
+        let took = (ProcessInfo.processInfo.systemUptime - started) * 1000
+        if took >= 5 { log(String(format: "接收器：停止 · %@ 用了 %.0f 毫秒", name, took)) }
     }
 
     private final class SessionState {

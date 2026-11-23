@@ -23,6 +23,8 @@ struct CfMotoLiveStats {
     var scaleText = "—"
     /// Frames handed to the dash over the last two seconds, divided by two.
     var servedFPS: Double = 0
+    /// Mbit/s actually put on the wire over the last two seconds.
+    var bitrateMbps: Double = 0
     /// Share of served frames that were re-sent from the cache.
     var paddedRatio: Double = 0
     /// Share of served frames that were keyframes.
@@ -127,8 +129,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var decodeErrors = 0
     /// Idle pulls answered by re-encoding the last picture.
     private var repeatedCount = 0
-    /// Rolling window used for the live frame rate shown on screen.
-    private var servedTimes: [TimeInterval] = []
+    /// Rolling window of (when, how many bytes) for the live rate readout. Bytes are kept because
+    /// the bitrate shown on screen has to be what is actually being sent now, not since the session
+    /// started, which is what the cumulative counters would give.
+    private var servedWindow: [(at: TimeInterval, bytes: Int)] = []
     /// Cumulative bytes and keyframes handed to the dash, for the average frame size and IDR share.
     private var servedBytes = 0
     private var servedKeyframes = 0
@@ -164,10 +168,29 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
 
     /// Same string, for callers that already hold the lock.
     private func countersLocked() -> String {
-        let format = nonH264 > 0 ? "H.265×\(nonH264)" : (parametersReady ? "H.264 就绪" : "H.264 等 SPS")
-        let drops = "丢弃[等IDR \(dropWaitingIDR)/冷却 \(dropCooldown)/无解码器 \(dropNoDecoder)/空帧 \(dropNoPicture)/无回调 \(dropNoCallback)/异常 \(decodeErrors)]" +
-            " · 参数集 \(parameterSetOnly)"
-        return "CarPlay \(inbound) · \(format) · SPS×\(paramSets) · 解码 \(decodedCount) · 编码 \(encodedCount) · 拉帧 \(pulls) · 送出 \(servedCount) · 重发 \(repeatedCount) · \(drops)"
+        let format = nonH264 > 0
+            ? "CarPlay 发的是 H.265（车机只认 H.264，已丢弃 \(nonH264) 帧）"
+            : (parametersReady ? "画面格式：H.264 已就绪" : "画面格式：还在等 CarPlay 的参数")
+        // Plain words on purpose: this line is read at the bike, where "拉帧" and "重发" mean nothing.
+        var parts = [
+            "CarPlay 送来 \(inbound) 帧",
+            format,
+            "解出画面 \(decodedCount) 帧",
+            "重新压缩 \(encodedCount) 帧",
+            "车机索要 \(pulls) 次",
+            "成功交付 \(servedCount) 帧",
+            "其中重复上一帧 \(repeatedCount) 次"
+        ]
+        var problems: [String] = []
+        if dropWaitingIDR > 0 { problems.append("等关键帧丢了 \(dropWaitingIDR)") }
+        if dropCooldown > 0 { problems.append("重建太频繁跳过 \(dropCooldown)") }
+        if dropNoDecoder > 0 { problems.append("没有解码器 \(dropNoDecoder)") }
+        if dropNoPicture > 0 { problems.append("空画面 \(dropNoPicture)") }
+        if dropNoCallback > 0 { problems.append("解码器没回应 \(dropNoCallback)") }
+        if decodeErrors > 0 { problems.append("解码出错 \(decodeErrors)") }
+        if parameterSetOnly > 0 { problems.append("纯参数包 \(parameterSetOnly)（正常）") }
+        if !problems.isEmpty { parts.append("异常：" + problems.joined(separator: "、")) }
+        return parts.joined(separator: " · ")
     }
 
     /// Applies the manual overrides from the EasyConn page on top of the profile's suggestion.
@@ -347,8 +370,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Caller holds `lock`. Feeds the rolling window used by the live readout and by diagnostics.
     private func noteServed(_ bytes: Int, keyframe: Bool) {
         let now = ProcessInfo.processInfo.systemUptime
-        servedTimes.append(now)
-        if servedTimes.count > 512 { servedTimes.removeFirst(servedTimes.count - 512) }
+        servedWindow.append((now, bytes))
+        servedWindow.removeAll { now - $0.at > 3 }
         servedBytes += bytes
         if keyframe { servedKeyframes += 1 }
     }
@@ -457,8 +480,11 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let now = ProcessInfo.processInfo.systemUptime
         let window: TimeInterval = 2.0
-        let recent = servedTimes.filter { now - $0 <= window }.count
-        let fps = Double(recent) / window
+        let recent = servedWindow.filter { now - $0.at <= window }
+        let fps = Double(recent.count) / window
+        // Bits actually put on the wire over the last two seconds, not the session average: the
+        // point of showing it is to compare against the configured cap right now.
+        let bytesPerSecond = Double(recent.reduce(0) { $0 + $1.bytes }) / window
         let canvasText = canvas.map { "\($0.width)×\($0.height)" } ?? "—"
         let sourceText = sourceWidth > 0 ? "\(sourceWidth)×\(sourceHeight)" : "—"
         var scaleText = "—"
@@ -471,6 +497,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         return CfMotoLiveStats(
             carPlaySize: sourceText, canvasSize: canvasText, scaleText: scaleText,
             servedFPS: fps,
+            bitrateMbps: bytesPerSecond * 8 / 1_000_000,
             paddedRatio: servedCount > 0 ? Double(repeatedCount) / Double(servedCount) : 0,
             keyframeRatio: servedCount > 0 ? Double(servedKeyframes) / Double(servedCount) : 0,
             averageFrameKB: servedCount > 0 ? Double(servedBytes) / Double(servedCount) / 1024 : 0,

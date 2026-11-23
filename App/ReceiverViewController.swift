@@ -1236,14 +1236,14 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             return
         }
         let s = receiver.cfmotoLiveStats
-        let fps = String(format: "%.1f", s.servedFPS)
         outputInfoLabel.text = [
-            "输出 \(s.canvasSize) · \(fps) fps",
-            "CarPlay \(s.carPlaySize) · 缩放 \(s.scaleText)",
-            "补帧 \(Int(s.paddedRatio * 100))% · 关键帧 \(Int(s.keyframeRatio * 100))% · 平均 \(String(format: "%.1f", s.averageFrameKB)) KB"
+            String(format: "输出 %@ · %.1f fps · %.1f Mbps", s.canvasSize, s.servedFPS, s.bitrateMbps),
+            "CarPlay \(s.carPlaySize) · \(s.scaleText == "1:1" ? "不缩放" : "缩放 \(s.scaleText)")",
+            "重复画面 \(Int(s.paddedRatio * 100))% · 关键帧 \(Int(s.keyframeRatio * 100))% · 每帧 \(String(format: "%.1f", s.averageFrameKB)) KB"
         ].joined(separator: "\n")
         outputInfoLabel.isHidden = false
-        previewInfoLabel.text = "车机 \(s.canvasSize) · \(fps) fps · \(s.scaleText)"
+        previewInfoLabel.text = String(format: "车机 %@ · %.1f fps · %.1f Mbps · %@",
+                                       s.canvasSize, s.servedFPS, s.bitrateMbps, s.scaleText)
         previewInfoLabel.isHidden = !displayedVideo
     }
 

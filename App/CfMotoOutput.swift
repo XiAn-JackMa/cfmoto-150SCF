@@ -215,9 +215,9 @@ final class CfMotoOutput {
                 guard let self, self.lock.withLock({ self.link != nil }) else { return }
                 let (state, stats) = self.lock.withLock { (self.lastState, self.lastStats) }
                 if let stats {
-                    self.log("[车机] 送出=\(stats.framesSent) 关键帧=\(stats.keyframesSent)" +
-                        " 字节=\(stats.bytesSent / 1024)KB 漏拉=\(stats.missedPulls)" +
-                        " 速率=\(String(format: "%.1f", stats.pullRate)) 状态=\(state.replacingOccurrences(of: "[状态] ", with: ""))")
+                    self.log("[车机] 已交付 \(stats.framesSent) 帧 · 其中关键帧 \(stats.keyframesSent) · 约 \(stats.bytesSent / 1024) KB" +
+                        " · 车机没等到回复 \(stats.missedPulls) 次 · 每秒 \(String(format: "%.1f", stats.pullRate)) 次" +
+                        " · 状态：\(state.replacingOccurrences(of: "[状态] ", with: ""))")
                 } else {
                     self.log("[车机] 尚无数据 状态=\(state.replacingOccurrences(of: "[状态] ", with: ""))")
                 }
@@ -226,13 +226,13 @@ final class CfMotoOutput {
                 self.logDiagnosticIfDue()
                 let idle = self.source.inboundIdle
                 if idle > 5 {
-                    self.log("[管道] \(self.source.counters)")
+                    self.log("[画面] \(self.source.counters)")
                     // The dash is showing black because CarPlay has not produced a picture; that is a
                     // CarPlay session problem, not an EasyConn one. One line, and only when the
                     // silence changes, so a long black period does not bury the log.
                     self.noteCarPlaySilence(idle)
                 } else {
-                    self.log("[管道] \(self.source.counters)")
+                    self.log("[画面] \(self.source.counters)")
                     self.lastSilenceSeconds = 0
                 }
                 // Counters go to the log view only. Raising the status label here would rebuild the
@@ -286,12 +286,10 @@ final class CfMotoOutput {
         guard Date().timeIntervalSince(lastDiagnosticAt) >= 10 else { return }
         lastDiagnosticAt = Date()
         let s = source.liveStats
-        var text = "[诊断] CarPlay \(s.carPlaySize) → 画布 \(s.canvasSize) · 缩放 \(s.scaleText)" +
-            String(format: " · 发出 %.1f fps · 补帧 %.0f%% · 关键帧 %.0f%% · 平均 %.1f KB",
-                   s.servedFPS, s.paddedRatio * 100, s.keyframeRatio * 100, s.averageFrameKB)
-        if s.scaleText != "1:1", s.scaleText != "—" {
-            text += " ← 尺寸不一致，每帧都在重采样"
-        }
+        var text = "[诊断] 车机画面 \(s.canvasSize) ← CarPlay \(s.carPlaySize) · " +
+            (s.scaleText == "1:1" ? "尺寸一致，不缩放" : "缩放 \(s.scaleText)（画面会变糊）") +
+            String(format: " · 每秒送 %.1f 帧 · 重复画面 %.0f%% · 关键帧 %.0f%% · 每帧 %.1f KB · 约 %.1f Mbps",
+                   s.servedFPS, s.paddedRatio * 100, s.keyframeRatio * 100, s.averageFrameKB, s.bitrateMbps)
         log(text)
     }
     /// Reports a CarPlay silence, but only when there is genuinely no picture.
