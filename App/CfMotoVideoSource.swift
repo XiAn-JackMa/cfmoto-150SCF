@@ -33,6 +33,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Last keyframe access unit, resent when a pull finds nothing new: no encoding, and a dash
     /// that lost its reference frames can always resume on it.
     private var lastKeyframeAU: Data?
+    /// A new picture arrived that has not been encoded yet. Encoding the same picture twice can
+    /// yield byte-identical P-frames, which §15.2 forbids (re-applying one corrupts the picture),
+    /// so an unchanged picture is answered with the cached IDR instead.
+    private var pictureDirty = true
 
     /// Synthetic colour-bar source: validates the whole EasyConn path (canvas, encoder, framing,
     /// pulls, repeats) without waiting for CarPlay, on the bench or on the bike.
@@ -140,6 +144,15 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             queue.invalidateKeyframe()
             queue.resynchronize()
         }
+        // Seed a black picture so the very first pull has an answer. Without it the dash's first
+        // 114 finds nothing, waits out its 9 s timeout and drops the link - twice in a row after a
+        // restart, which is what made "start CarPlay" appear to hang on 正在连接 until the simulator
+        // was restarted too. CarPlay replaces this the moment it produces a frame.
+        if lock.withLock({ fittedBuffer == nil }) {
+            if let black = blackFrame(width: canvas.width, height: canvas.height) {
+                lock.lock(); fittedBuffer = black; lock.unlock()
+            }
+        }
         // After the queue reset above, so the pattern's first keyframe is not flushed by it.
         startPatternIfNeeded()
     }
@@ -166,56 +179,58 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     }
 
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
-        lock.lock(); pulls += 1; lock.unlock()
-
-        // CarPlay delivers in bursts and every picture needs decode + encode (20-40 ms) before it
-        // reaches the queue, so a pull that arrives a moment early finds nothing even when the
-        // supply exceeds the pull rate (measured: 21 frames/s arriving, 18 pulls/s, yet a third of
-        // the pulls fell in that in-flight window). Waiting 25 ms was shorter than the pipeline
-        // itself; 50 ms lets the frame that is already being processed answer the pull.
-        let waitForQueued = min(timeout, 0.050)
-        if let frame = await queue.next(timeout: waitForQueued) {
-            lock.lock(); servedCount += 1; lock.unlock()
-            return frame
-        }
-
-        // Still nothing: answer from the picture in hand.
-        //
-        // It has to be *this* picture, not the last keyframe's bytes. Resending the cached IDR was
-        // cheap, but that access unit belongs to the picture of up to a second ago, so the dash
-        // showed the older frame every time a pull was padded - a music progress bar visibly walked
-        // backwards (52 s, 51 s, 52 s). Encoding the current picture with forceKeyframe gives fresh
-        // content *and* an IDR, which is the only kind that may be repeated (a repeated P-frame is
-        // a §15.2 violation because re-applying it corrupts the picture).
         lock.lock()
-        let waiting = decoderNeedsKeyframe
-        let since = decoderWaitingSince
+        pulls += 1
         let prepared = fittedBuffer
         let canvas = self.canvas
+        let waiting = decoderNeedsKeyframe
+        let since = decoderWaitingSince
         lock.unlock()
-        if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter {
-            // Keep the session alive while the keyframe request below keeps asking CarPlay for a
-            // fresh one; answering nothing would park a lock-step dash until its 9 s timeout.
-            diagnose("等关键帧 \(Int(Date().timeIntervalSince(since)))s，先用当前画面维持会话")
-            onKeyframeRequest?()
-        }
-        if let prepared, let canvas, let frame = encode(prepared, canvas: canvas, force: true) {
+
+        // One pull, one encode of the picture in hand: the dash is lock-step, so a queue in between
+        // only adds staleness and overflow. Nothing to encode yet means CarPlay has not produced a
+        // picture at all, which only happens in the first moments of a session.
+        let dirty = lock.withLock { pictureDirty }
+        let cachedKeyframe = lock.withLock { lastKeyframeAU }
+        if !dirty, let keyframe = cachedKeyframe {
+            // The picture has not changed since the last encode, so the cached IDR is exactly what
+            // the dash should see; re-encoding identical content risks a byte-identical P-frame.
             lock.lock()
             servedCount += 1; repeatedCount += 1
             sequence &+= 1
             let seq = sequence
             lock.unlock()
-            return EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
+            if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter { onKeyframeRequest?() }
+            return EncodedFrame(accessUnit: keyframe, isKeyframe: true,
                                 presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
         }
+        if let prepared, let canvas {
+            if waiting, Date().timeIntervalSince(since) > idrGiveUpAfter {
+                // The decoder cannot use the stream; keep the link alive while CarPlay is asked for
+                // a keyframe. Answering nothing would park a lock-step dash until its 9 s timeout.
+                diagnose("等关键帧 \(Int(Date().timeIntervalSince(since)))s，先用当前画面维持会话")
+                onKeyframeRequest?()
+            }
+            if let frame = encode(prepared, canvas: canvas) {
+                lock.lock()
+                servedCount += 1
+                encodedCount += 1
+                pictureDirty = false
+                sequence &+= 1
+                let seq = sequence
+                lock.unlock()
+                return EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
+                                    presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
+            }
+        }
 
-        // Encoding is unavailable right now. The cached keyframe is stale, so this is a last resort
-        // and the log says so; it beats stalling the link.
+        // No picture, or the encoder is momentarily unavailable: the cached keyframe is stale, so it
+        // is a last resort and the log says so. It beats stalling the link.
         lock.lock()
         let keyframe = lastKeyframeAU
         lock.unlock()
         if let keyframe {
-            diagnose("编码不可用，暂用旧关键帧补帧")
+            if prepared != nil { diagnose("编码不可用，暂用旧关键帧补帧") }
             lock.lock()
             servedCount += 1; repeatedCount += 1
             sequence &+= 1
@@ -225,13 +240,6 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                                 presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq)
         }
 
-        // No picture has ever been encoded (CarPlay has not produced anything yet): let it miss.
-        // This empties the dash's reply slot, so it must stay rare - the log says when it happens.
-        let remaining = max(0, timeout - waitForQueued)
-        if remaining > 0, let frame = await queue.next(timeout: remaining) {
-            lock.lock(); servedCount += 1; lock.unlock()
-            return frame
-        }
         diagnose("无任何可发画面（CarPlay 尚未产出），本次拉帧回空")
         return nil
     }
@@ -293,19 +301,13 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             diagnose("letterbox failed")
             return
         }
-        lock.lock(); fittedBuffer = prepared; lock.unlock()
-        guard let frame = encode(prepared, canvas: canvas) else {
-            diagnose("encode returned nil")
-            return
-        }
-        lock.lock(); encodedCount += 1; lock.unlock()
-
-        lock.lock()
-        sequence &+= 1
-        let seq = sequence
-        lock.unlock()
-        queue.push(EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
-                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq))
+        // Only decode and letterbox here. Encoding happens on the pull, because this link is
+        // lock-step: the dash asks for one frame and waits. A free-running encoder pushed 20-24
+        // frames/s into a 3-deep queue while the dash consumed 15/s, so the queue overflowed
+        // several times a second; FrameQueue's overflow policy flushes and closes its keyframe gate,
+        // which left the queue empty and gated essentially always (measured: 100% of pulls were
+        // padded, not one queued frame ever served).
+        lock.lock(); fittedBuffer = prepared; pictureDirty = true; lock.unlock()
     }
 
     // MARK: - Decode
@@ -501,6 +503,20 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         }
     }
 
+    /// A black picture at the canvas size, used to answer the first pulls of a session.
+    private func blackFrame(width: Int, height: Int) -> CVPixelBuffer? {
+        var buffer: CVPixelBuffer?
+        let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary
+        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
+                                  attributes, &buffer) == kCVReturnSuccess, let buffer else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        if let base = CVPixelBufferGetBaseAddress(buffer) {
+            memset(base, 0, CVPixelBufferGetDataSize(buffer))
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        return buffer
+    }
+
     /// Letterboxes the CarPlay picture into the exact canvas the dash negotiated.
     private func fitted(_ image: CVPixelBuffer, width: Int, height: Int) throws -> CVPixelBuffer {
         if CVPixelBufferGetWidth(image) == width, CVPixelBufferGetHeight(image) == height { return image }
@@ -598,15 +614,13 @@ extension CfMotoVideoSource {
         guard alive, let canvas else { return }
 
         guard let buffer = drawPattern(width: canvas.width, height: canvas.height, tick: tick) else { return }
-        lock.lock(); decodedCount += 1; fittedBuffer = buffer; lock.unlock()
-        guard let frame = encode(buffer, canvas: canvas) else { return }
+        // Same shape as a real picture: hand it to the pull path instead of encoding here, so the
+        // test pattern travels the exact code the dash sees in normal use.
         lock.lock()
-        encodedCount += 1
-        sequence &+= 1
-        let seq = sequence
+        decodedCount += 1
+        fittedBuffer = buffer
+        pictureDirty = true
         lock.unlock()
-        queue.push(EncodedFrame(accessUnit: frame.data, isKeyframe: frame.isKeyframe,
-                                presentationTime: ProcessInfo.processInfo.systemUptime, sequence: seq))
     }
 
     fileprivate func drawPattern(width: Int, height: Int, tick: Int) -> CVPixelBuffer? {
