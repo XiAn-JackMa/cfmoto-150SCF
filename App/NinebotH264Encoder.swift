@@ -102,6 +102,10 @@ private let h264CompressionCallback: VTCompressionOutputCallback = { reference, 
 final class H264Encoder {
     private var session: VTCompressionSession?
     private let callbackBox = H264CallbackBox()
+    /// Serialises encode / complete / invalidate. VTCompressionSessionInvalidate waits for the
+    /// frames still in flight, so calling it while another thread is inside CompleteFrames hangs:
+    /// that wedged the receiver queue and left the app stuck on "starting CarPlay".
+    private let lock = NSLock()
     private let fps: Int
     private let profileLevel: ProfileLevel
     /// True when the session fell back to the software encoder (App in the background).
@@ -213,6 +217,7 @@ final class H264Encoder {
     deinit { invalidate() }
 
     func encode(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime, forceKeyframe: Bool) throws {
+        lock.lock(); defer { lock.unlock() }
         guard let session else { throw H264EncoderError.invalidated }
         var flags = VTEncodeInfoFlags()
         let properties: CFDictionary? = forceKeyframe
@@ -231,11 +236,13 @@ final class H264Encoder {
     }
 
     func complete() {
+        lock.lock(); defer { lock.unlock() }
         guard let session else { return }
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
     }
 
     func invalidate() {
+        lock.lock(); defer { lock.unlock() }
         guard let session else { return }
         VTCompressionSessionInvalidate(session)
         self.session = nil
@@ -243,6 +250,7 @@ final class H264Encoder {
     }
 
     private func set(_ key: CFString, value: CFTypeRef) throws {
+        lock.lock(); defer { lock.unlock() }
         guard let session else { throw H264EncoderError.invalidated }
         let status = VTSessionSetProperty(session, key: key, value: value)
         guard status == noErr else { throw H264EncoderError.property(key as String, status) }

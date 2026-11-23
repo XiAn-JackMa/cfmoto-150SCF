@@ -427,14 +427,14 @@ final class NativeReceiver {
         DispatchQueue.main.async { [weak self] in self?.discoveryService?.stop(); self?.discoveryService = nil }
         readyDeadline?.cancel(); readyDeadline = nil
         generation = UUID(); listener?.cancel(); listener = nil
-        videoOutput.stop()
-        carLife.stop()
-        zeeho.stop()
-        ninebot.stop()
-        tailing.stop()
-        cfmoto.stop()
-        cfmotoLogServer.stop()
-        carLink.stop()
+        step("videoOutput") { videoOutput.stop() }
+        step("carLife") { carLife.stop() }
+        step("zeeho") { zeeho.stop() }
+        step("ninebot") { ninebot.stop() }
+        step("tailing") { tailing.stop() }
+        step("cfmoto") { cfmoto.stop() }
+        step("cfmotoLogServer") { cfmotoLogServer.stop() }
+        step("carLink") { carLink.stop() }
         #if DEBUG
         diagnosticStarted = ProcessInfo.processInfo.systemUptime
         diagnosticCPU = TailingPerformanceDiagnostics.cpuTime()
@@ -448,6 +448,14 @@ final class NativeReceiver {
         sessions.values.forEach { $0.media?.stop() }; sessions.removeAll()
         log("接收器：停止完成")
     }
+    /// Names the step a stop is in. A stop that blocks used to leave only "停止开始" behind, with no
+    /// way to tell which of the eight teardowns never returned.
+    private func step(_ name: String, _ body: () -> Void) {
+        log("接收器：停止 → \(name)")
+        body()
+        log("接收器：停止 · \(name) 完成")
+    }
+
     private final class SessionState {
         var parser = RTSPParser()
         var authenticated = false

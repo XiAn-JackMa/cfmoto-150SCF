@@ -20,6 +20,10 @@ private let tailingDecompressionCallback: VTDecompressionOutputCallback = { refe
 }
 
 final class TailingH264Decoder {
+    /// Serialises decode / waitForFrames / invalidate. VTDecompressionSessionInvalidate must not
+    /// run while another thread is inside DecodeFrame: it blocked the caller, and the caller here
+    /// is the receiver queue, which then never ran another start.
+    private let lock = NSLock()
     private var session: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
     private let callbackBox = TailingH264DecoderCallbackBox()
@@ -39,6 +43,7 @@ final class TailingH264Decoder {
     deinit { invalidate() }
 
     func decode(_ data: Data, presentationTimeMicroseconds: Int64, isKeyframe: Bool) throws {
+        lock.lock(); defer { lock.unlock() }
         guard let session, let formatDescription else { throw TailingH264DecoderError.invalidated }
 
         var blockBuffer: CMBlockBuffer?
@@ -108,10 +113,12 @@ final class TailingH264Decoder {
 
     /// Called on the dedicated decode worker so VT cannot build an unbounded frame backlog.
     func waitForFrames() {
+        lock.lock(); defer { lock.unlock() }
         if let session { VTDecompressionSessionWaitForAsynchronousFrames(session) }
     }
 
     func invalidate() {
+        lock.lock(); defer { lock.unlock() }
         guard let session else { return }
         VTDecompressionSessionWaitForAsynchronousFrames(session)
         VTDecompressionSessionInvalidate(session)
