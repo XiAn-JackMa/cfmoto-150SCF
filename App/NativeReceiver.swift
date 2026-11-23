@@ -60,6 +60,8 @@ final class NativeReceiver {
     private let cfmoto = CfMotoOutput()
     private let cfmotoLogServer = CfMotoLogServer()
     var onCfMotoState: ((String) -> Void)?
+    /// The canvas the dash negotiated, so the app can re-render CarPlay at that exact size.
+    var onCfMotoCanvas: ((VideoCanvas) -> Void)?
     /// Snapshot for the settings screen's copy button.
     var cfmotoDiagnostics: String { cfmoto.diagnostics }
     /// Applies the test pattern to a running link, not only to the next start.
@@ -147,6 +149,7 @@ final class NativeReceiver {
                     self?.log($0)
                 }
                 self.cfmoto.onState = { [weak self] in self?.onCfMotoState?($0) }
+                self.cfmoto.onCanvas = { [weak self] in self?.onCfMotoCanvas?($0) }
                 self.cfmoto.onKeyframeRequest = { [weak self] in
                     self?.requestKeyFrame(reason: "CFMOTO 解码恢复")
                 }

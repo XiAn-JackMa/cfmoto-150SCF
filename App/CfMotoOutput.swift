@@ -18,6 +18,8 @@ final class CfMotoOutput {
     var onLog: ((String) -> Void)?
     /// CarPlay must produce a fresh keyframe (the dash's decoder resynchronised).
     var onKeyframeRequest: (() -> Void)?
+    /// Raised when the dash negotiates a canvas, so CarPlay can render at that exact size.
+    var onCanvas: ((VideoCanvas) -> Void)?
 
     /// Recreated on every start: shutting a source down closes its frame queue, so reusing the
     /// instance after Stop would leave the next session with a queue nothing can push into.
@@ -183,6 +185,9 @@ final class CfMotoOutput {
                     // Remembered for planDisplay(): the next session renders CarPlay 1:1 at the
                     // canvas instead of letterboxing a 16:9 picture into it.
                     UserDefaults.standard.set("\(canvas.width)x\(canvas.height)", forKey: "cfmotoCanvas")
+                // The dash renegotiated its canvas. CarPlay has to be re-rendered at that size,
+                // otherwise every picture is rescaled on the phone and arrives soft.
+                DispatchQueue.main.async { [weak self] in self?.onCanvas?(canvas) }
                 }
                 let line = Self.describe(event)
                 self.log(line)

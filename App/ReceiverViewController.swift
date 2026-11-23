@@ -220,6 +220,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     /// When the local CarPlay start was requested, so the first frame can report how long it took.
     private var carPlayStartAt: Date?
     private var carPlayWatchdog: DispatchWorkItem?
+    /// Canvas a restart was already performed for, so a renegotiation cannot loop.
+    private var canvasRestartedFor: String?
     private let startupHint = UILabel()
     private var startupHintTask: DispatchWorkItem?
     private var startupHintGeneration = UUID()
@@ -672,6 +674,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         // No output-mode gate: EasyConn is enabled by its address, whatever mode is selected.
         receiver.onCfMotoLog = { [weak self] line in self?.appendCfMotoLog(line) }
+        receiver.onCfMotoCanvas = { [weak self] canvas in self?.adoptCfMotoCanvas(canvas) }
         receiver.onCfMotoState = { [weak self] message in
             // The output raises this from its own queues; the card is UIKit.
             DispatchQueue.main.async {
@@ -1723,6 +1726,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
 
     private func stop() {
         localStartupID = nil
+        canvasRestartedFor = nil
         networkStartupTask?.cancel()
         networkStartupTask = nil
         waitingForNetwork = false
@@ -1765,6 +1769,23 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         carPlayWatchdog = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: work)
+    }
+
+    /// Re-renders CarPlay when the dash negotiates a different canvas than the one in use.
+    ///
+    /// planDisplay() can only use the canvas remembered from the previous session, so a first
+    /// run against a new dash renders at the old size and every picture is rescaled on the phone
+    /// before it is encoded - which is exactly what "soft picture and vertical seams" looks like.
+    /// Restarting once at the negotiated size removes the rescale entirely.
+    private func adoptCfMotoCanvas(_ canvas: VideoCanvas) {
+        guard running, outputMode.isEasyConn else { return }
+        let size = "\(canvas.width)x\(canvas.height)"
+        guard liveDisplay.width != canvas.width || liveDisplay.height != canvas.height else { return }
+        guard canvasRestartedFor != size else { return }
+        canvasRestartedFor = size
+        UserDefaults.standard.set(size, forKey: "cfmotoCanvas")
+        log("车机画布为 \(size)，当前渲染 \(liveDisplay.width)×\(liveDisplay.height)，按车机尺寸重启 CarPlay")
+        restartCarPlay(reason: "车机画布 \(size)")
     }
 
     private func clearStartupHint() {
