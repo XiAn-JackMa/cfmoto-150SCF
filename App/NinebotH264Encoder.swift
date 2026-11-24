@@ -121,13 +121,15 @@ final class H264Encoder {
     /// True when the session fell back to the software encoder (App in the background).
     private(set) var usingSoftware = false
 
-    /// Which H.264 level to declare.
+    /// Which H.264 profile/level to declare.
     ///
-    /// `auto` lets VideoToolbox pick, which yields Baseline 3.0 for these canvas sizes. The Android
-    /// reference client (and the official app) emit **Baseline 3.1**, and fakedash flags the
-    /// difference; some dash decoders validate the level, so callers that feed a dash can pin 3.1.
+    /// `auto` keeps Baseline with an automatic level (the safe default for Ninebot/Zeeho).
+    /// `mainAuto` switches to Main profile for better compression, for dashes that decode Main.
+    /// `baseline31` pins Baseline 3.1, which the official CFMOTO app and the Android reference
+    /// client emit; some dash decoders validate the level, so callers can pin it.
     enum ProfileLevel {
         case auto
+        case mainAuto
         case baseline31
     }
 
@@ -206,9 +208,13 @@ final class H264Encoder {
         do {
             try set(kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
             try set(kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-                        try set(kVTCompressionPropertyKey_ProfileLevel,
-                    value: profileLevel == .baseline31 ? kVTProfileLevel_H264_Baseline_3_1
-                                                      : kVTProfileLevel_H264_Baseline_AutoLevel)
+            let level: CFString
+            switch profileLevel {
+            case .baseline31: level = kVTProfileLevel_H264_Baseline_3_1
+            case .mainAuto:   level = kVTProfileLevel_H264_Main_AutoLevel
+            case .auto:       level = kVTProfileLevel_H264_Baseline_AutoLevel
+            }
+            try set(kVTCompressionPropertyKey_ProfileLevel, value: level)
             // Best effort: not every encoder honours Quality, and a rejected property must not
             // cost us the session.
             if let quality { try? set(kVTCompressionPropertyKey_Quality, value: quality as CFNumber) }

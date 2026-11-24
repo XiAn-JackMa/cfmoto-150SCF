@@ -339,7 +339,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
              String(format: " · 实际编码 %.1f Mbps @ %d fps · 关键帧 %.1f 秒 · %@",
                     Double(effective.bitrate) / 1_000_000, effective.frameRate,
                     effective.keyframeIntervalSeconds,
-                    effective.forceBaseline ? "Baseline 3.1" : "自动 profile"))
+                    effective.forceBaseline ? "Baseline 3.1" : "Main profile"))
         if sizeChanged {
             // A keyframe of the previous canvas must never answer a pull for this one: a cached
             // access unit from the old size would decode as garbage on the dash.
@@ -402,7 +402,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 padEncoder = try H264Encoder(
                     width: canvas.width, height: canvas.height,
                     fps: encoderSettings.frameRate, bitrate: CfMotoTuning.staticPadBitrate,
-                    profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .auto,
+                    profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .mainAuto,
                     // Bias quantisation directly: a lone keyframe after idle would otherwise ignore
                     // the bitrate target entirely.
                     quality: 0.15,
@@ -1001,7 +1001,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 // the lock instead of a local variable captured by the escaping closure.
                 encoder = try H264Encoder(width: canvas.width, height: canvas.height,
                                           fps: settings.frameRate, bitrate: settings.bitrate,
-                                          profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .auto,
+                                          profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .mainAuto,
                                           keyframeSeconds: settings.keyframeIntervalSeconds) { [weak self] outcome in
                     guard let self else { return }
                     self.lock.lock(); self.encodedResult = outcome; self.lock.unlock()

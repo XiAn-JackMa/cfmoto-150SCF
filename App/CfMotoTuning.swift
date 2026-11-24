@@ -52,7 +52,7 @@ enum CfMotoTuning {
 
     // MARK: Profile
 
-    /// Baseline@3.1 keeps old dash decoders happy at the cost of ~10% compression efficiency.
+    /// Baseline@3.1 is what the official CFMOTO app emits; Main profile compresses ~10% better.
     // MARK: Static picture
 
     /// Answer an idle pull with a smaller keyframe instead of the full-quality one.
@@ -78,7 +78,7 @@ enum CfMotoTuning {
 
     static var staticPadMbps: Double { Double(staticPadBitrate) / 1_000_000 }
 
-    /// Off by default: the 150SCF decodes the higher profiles, so VideoToolbox picks the leaner one.
+    /// Off by default: Main profile (auto level) for leaner compression; on pins Baseline 3.1.
     static var forceBaseline: Bool {
         get { defaults.object(forKey: Key.baseline) as? Bool ?? false }
         set { defaults.set(newValue, forKey: Key.baseline) }
@@ -121,7 +121,7 @@ enum CfMotoTuning {
         let intra = allIntra ? " · 全关键帧" : ""
         return String(format: "%.1f Mbps · %d fps · 关键帧 %.1f 秒 · %@ · 等待画布 %.0f 秒",
                       bitrateMbps, frameRate, keyframeSeconds,
-                      forceBaseline ? "Baseline 3.1" : "自动 profile",
+                      forceBaseline ? "Baseline 3.1" : "Main profile",
                       canvasWaitSeconds) + extras + pad + intra
     }
 
