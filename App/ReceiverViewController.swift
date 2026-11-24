@@ -1283,54 +1283,57 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let plan = planDisplay(for: targetScreen)
         return CGFloat(plan.height) / CGFloat(plan.width)
     }
-    /// One snapshot of every setting, written to the log whenever a session starts.
+    /// Everything on the 输出设置 page, written to the log whenever a session starts.
     ///
-    /// Answering "why did the picture look like that on Tuesday" needs the settings that were in
-    /// force at the time. Otherwise the log only records whichever value happened to be mentioned
-    /// while something was going wrong, which is exactly the worse half of the picture.
+    /// Those are the values that decide what the picture looks like. Otherwise a log from
+    /// yesterday says nothing about the bitrate, the frame cap or whether all-intra was on,
+    /// and every diagnosis after the fact is a guess.
     private func logSettingsSnapshot(_ plan: DisplayPlan) {
         func joined(_ pairs: [(String, String)]) -> String {
             pairs.map { "\($0.0)=\($0.1)" }.joined(separator: " · ")
         }
-        let dashIP = (cfmotoAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
-        let port = (cfmotoPortField.text ?? "").trimmingCharacters(in: .whitespaces)
-        log("设置[链路] " + joined([
-            ("输出", headUnitOutput.selectedTitle),
-            ("车机IP", dashIP.isEmpty ? "自动" : dashIP),
-            ("端口", port.isEmpty ? "10930" : port),
-            ("测试图案", cfmotoTestSwitch.isOn ? "开" : "关"),
-            ("记忆画布", UserDefaults.standard.string(forKey: "cfmotoCanvas") ?? "无"),
-            ("日志端口", "\(CfMotoLogServer.defaultPort)")
-        ]))
-        log("设置[画面] " + joined([
-            ("码率", String(format: "%.1f Mbps", CfMotoTuning.bitrateMbps)),
-            ("帧率上限", "\(CfMotoTuning.frameRate) fps"),
-            ("关键帧间隔", String(format: "%.1f 秒", CfMotoTuning.keyframeSeconds)),
-            ("强制Baseline3.1", CfMotoTuning.forceBaseline ? "是" : "否"),
-            ("等待画布", String(format: "%.0f 秒", CfMotoTuning.canvasWaitSeconds)),
-            ("固定画布", CfMotoTuning.canvasOverride ?? "跟随车机"),
-            ("静止补帧", CfMotoTuning.staticPadEnabled
-                ? String(format: "开（%.1f Mbps）", CfMotoTuning.staticPadMbps) : "关"),
-            ("缓存深度", "\(CfMotoTuning.bufferDepth) 帧"),
-            ("等关键帧上限", String(format: "%.1f 秒", CfMotoTuning.idrWaitSeconds)),
-            ("静止判定", String(format: "%.2f 秒", CfMotoTuning.staticIdleSeconds)),
-            ("全关键帧", CfMotoTuning.allIntra ? "开" : "关"),
-            ("是否默认", CfMotoTuning.isDefault ? "是" : "已改")
-        ]))
-        log("设置[CarPlay] " + joined([
-            ("渲染", "\(plan.width)×\(plan.height)"),
-            ("maxFPS", "\(plan.fps)"),
-            ("编码", plan.codec.displayName),
-            ("图标", iconSizeControl.selectedTitle),
-            ("外观", appearanceControl.selectedTitle),
-            ("驾驶位", driveControl.selectedTitle),
-            ("自动重启", autoRestartSwitch.isOn ? "开" : "关"),
-            ("音源", selectedSoundOutput.title)
-        ]))
-        log("设置[后台] " + joined([
-            ("锁屏继续", keepAliveSwitch.isOn ? "开" : "关"),
-            ("画中画", pictureInPictureTiming.selectedTitle)
-        ]))
+        switch outputMode {
+        case .cfmoto:
+            let dashIP = (cfmotoAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
+            let port = (cfmotoPortField.text ?? "").trimmingCharacters(in: .whitespaces)
+            log("设置[EasyConn] " + joined([
+                ("车机IP", dashIP.isEmpty ? "自动（本机 Wi-Fi 网关）" : dashIP),
+                ("端口", port.isEmpty ? "10930" : port),
+                ("测试图案", cfmotoTestSwitch.isOn ? "开" : "关")
+            ]))
+            log("设置[画面参数] " + joined([
+                ("码率", String(format: "%.1f Mbps", CfMotoTuning.bitrateMbps)),
+                ("帧率上限", "\(CfMotoTuning.frameRate) fps"),
+                ("关键帧间隔", String(format: "%.1f 秒", CfMotoTuning.keyframeSeconds)),
+                ("启动等待画布", String(format: "%.0f 秒", CfMotoTuning.canvasWaitSeconds)),
+                ("固定画布", CfMotoTuning.canvasOverride ?? "跟随车机"),
+                ("强制Baseline3.1", CfMotoTuning.forceBaseline ? "是" : "否"),
+                ("静止补帧", CfMotoTuning.staticPadEnabled
+                    ? String(format: "开（%.1f Mbps）", CfMotoTuning.staticPadMbps) : "关"),
+                ("缓存深度", "\(CfMotoTuning.bufferDepth) 帧"),
+                ("等关键帧上限", String(format: "%.1f 秒", CfMotoTuning.idrWaitSeconds)),
+                ("静止判定", String(format: "%.2f 秒", CfMotoTuning.staticIdleSeconds)),
+                ("强制全关键帧", CfMotoTuning.allIntra ? "开" : "关"),
+                ("是否默认", CfMotoTuning.isDefault ? "是" : "已改")
+            ]))
+        default:
+            let addressField: UITextField?
+            switch outputMode {
+            case .zeeho: addressField = zeehoAddressField
+            case .ninebot: addressField = ninebotAddressField
+            case .tailing: addressField = tailingAddressField
+            case .carLife: addressField = carLifeAddressField
+            default: addressField = nil
+            }
+            let address = (addressField?.text ?? "").trimmingCharacters(in: .whitespaces)
+            log("设置[输出] " + joined([
+                ("输出", headUnitOutput.selectedTitle),
+                ("仪表IP", addressField == nil ? "不适用" : (address.isEmpty ? "自动" : address)),
+                ("画面", "\(plan.width)×\(plan.height)"),
+                ("编码", plan.codec.displayName),
+                ("帧率", "\(plan.fps)")
+            ]))
+        }
     }
 
     private func configureDisplay(_ config: inout ReceiverConfiguration) {
@@ -3749,6 +3752,9 @@ extension ReceiverViewController: PHPickerViewControllerDelegate {
         }
     }
 }
+
+
+
 
 
 
