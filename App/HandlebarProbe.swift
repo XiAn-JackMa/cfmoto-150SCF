@@ -13,9 +13,9 @@
 //             one 0.10 step, so a double is only visible as a bigger jump.
 //   enter     togglePlayPauseCommand (sometimes a bare next/previous arrives instead).
 //   holds     none: the dash never sends seek/FAST_FORWARD, so no key has a real press/release pair.
-// So ▲▼ turn the wheel, a merged double steps once and then goes Back (a way out of a screen), enter
-// (which arrives only as play/pause = the held press) maps straight to Select, and a bare track key
-// is treated as the same notch.
+// So the four volume gestures (▲▼ short/double) carry the whole UI — short is previous/next, double
+// is select/back — while SET and the track keys are transport keys that the music app owns during
+// playback, so they default to no mapping. See HandlebarMapping for the exact default.
 
 import AVFoundation
 import Foundation
@@ -63,6 +63,11 @@ final class HandlebarProbe: @unchecked Sendable {
     private var samples: [HandlebarRawSample] = []
     private var commandTargets: [(MPRemoteCommand, Any)] = []
     private var volumeObservation: NSKeyValueObservation?
+    /// Kept attached to the window so the MPVolumeView slider actually writes the system volume.
+    private var volumeView: MPVolumeView?
+    /// A single press is held back until the double window closes, so a slow double never fires the
+    /// single action first.
+    private var singleDelayTimers: [Int: Timer] = [:]
     private var silent: AVAudioPlayer?
     private var nowPlayingObservers: [NSObjectProtocol] = []
     private var nowPlayingWatchdog: Timer?
@@ -123,6 +128,10 @@ final class HandlebarProbe: @unchecked Sendable {
         volumeObservation?.invalidate()
         volumeObservation = nil
         repeatTimer?.invalidate(); repeatTimer = nil
+        singleDelayTimers.values.forEach { $0.invalidate() }
+        singleDelayTimers.removeAll()
+        volumeView?.removeFromSuperview()
+        volumeView = nil
         stopNowPlayingKeepAlive()
         silent?.stop()
         silent = nil
@@ -233,8 +242,8 @@ final class HandlebarProbe: @unchecked Sendable {
     //   BACK       consumed by the dash — the phone never sees it.
     // So confirm and back cannot come from their own buttons and are built from doubles.
 
-    /// ▲/▼ short press. A second press on the same arrow inside the window is a double; a jump the
-    /// firmware merged is a double by itself.
+    /// ▲/▼ volume step. A merged jump (≥0.075) is a double by itself; otherwise the single action is
+    /// held back until the double window closes, so a slow double never fires the single first.
     private func handleVolume(direction: Int, steps: Float) {
         restoreVolume(direction: direction, steps: steps)
         guard onControl != nil else { return }
@@ -242,28 +251,50 @@ final class HandlebarProbe: @unchecked Sendable {
 
         if steps >= Float(0.075) {
             // The firmware merged a fast double into one bigger step.
-            lastArrow.removeAll()
+            cancelPendingSingle(direction)
+            lastArrow[direction] = nil
             onLog?("[手势] 步进 \(String(format: "%.3f", steps)) ≥ 0.075，固件已合并 → 双击")
             fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
             return
         }
 
         if let last = lastArrow[direction], now.timeIntervalSince(last) < HandlebarMapping.doubleTapWindow {
-            lastArrow.removeAll()
-            onLog?("[手势] 与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last) * 1000))ms < 双击窗口 \(String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000))ms → 双击")
+            // Second small step inside the window: a slow double.
+            cancelPendingSingle(direction)
+            lastArrow[direction] = nil
+            onLog?("[手势] 与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last) * 1000))ms < 双击窗口 \(String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000))ms → 双击（取消单击）")
             fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
             return
         }
+
+        // First small step: could still be the first half of a slow double, so delay the single.
         lastArrow[direction] = now
-        onLog?("[手势] 记录 \(direction > 0 ? "▲" : "▼") 单击，进入双击窗口")
-        fire(direction > 0 ? .arrowUpShort : .arrowDownShort)
+        cancelPendingSingle(direction)
+        let d = direction
+        let timer = Timer(timeInterval: HandlebarMapping.doubleTapWindow, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.lastArrow[d] = nil
+            self.singleDelayTimers[d] = nil
+            guard self.onControl != nil else { return }
+            self.onLog?("[手势] 双击窗口结束，无第二次 → 单击")
+            self.fire(d > 0 ? .arrowUpShort : .arrowDownShort)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        singleDelayTimers[direction] = timer
+        onLog?("[手势] 记录 \(direction > 0 ? "▲" : "▼") 首次按下，等待双击窗口 \(String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000))ms 后判定")
+    }
+
+    private func cancelPendingSingle(_ direction: Int) {
+        singleDelayTimers[direction]?.invalidate()
+        singleDelayTimers[direction] = nil
     }
 
     /// Puts the system volume back where the press found it, so ▲▼ stay usable at full scale.
     ///
     /// The dash reads its own arrow as a volume key, so the phone's volume is a side effect of
-    /// navigating. Restoring it needs no UI: `MPVolumeView`'s slider is the supported way to write
-    /// `outputVolume`, and the change it makes is filtered out so it is not taken for another press.
+    /// navigating. `MPVolumeView`'s slider is the supported way to write `outputVolume`, but only
+    /// while the view is attached to a window — a detached one does nothing, so we keep one mounted
+    /// off-screen and reuse it. The change it makes is filtered out so it is not taken for another press.
     private func restoreVolume(direction: Int, steps: Float) {
         let session = AVAudioSession.sharedInstance()
         let current = session.outputVolume
@@ -272,21 +303,34 @@ final class HandlebarProbe: @unchecked Sendable {
         onLog?("[回拨] 音量 \(String(format: "%.3f", current)) → \(String(format: "%.3f", target))（\(direction > 0 ? "↑" : "↓") 回拨 \(String(format: "%.3f", steps))）")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            var foundSlider = false
-            let slider = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
-            for view in slider.subviews {
-                guard let control = view as? UISlider else { continue }
-                control.value = target
-                control.sendActions(for: .touchUpInside)
-                foundSlider = true
-                break
+            if self.volumeView == nil {
+                let volumeView = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 100, height: 100))
+                volumeView.alpha = 0.01
+                let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+                let window = scene?.windows.first(where: { $0.isKeyWindow }) ?? scene?.windows.first
+                window?.addSubview(volumeView)
+                volumeView.setNeedsLayout()
+                volumeView.layoutIfNeeded()
+                self.volumeView = volumeView
             }
-            if !foundSlider {
+            if let slider = self.findVolumeSlider(in: self.volumeView!) {
+                slider.value = target
+                slider.sendActions(for: .touchUpInside)
+                self.onLog?("[回拨] 已写入目标音量（MPVolumeView 挂窗）")
+            } else {
                 self.onLog?("[回拨] 未找到音量 slider，音量可能没有拨回")
             }
             // The write echoes back through the observer; ignore it, then allow presses again.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.restoringVolume = false }
         }
+    }
+
+    private func findVolumeSlider(in view: UIView) -> UISlider? {
+        if let slider = view as? UISlider { return slider }
+        for subview in view.subviews {
+            if let found = findVolumeSlider(in: subview) { return found }
+        }
+        return nil
     }
 
     /// SET reaches the phone only as a play/pause command, and only when SET is HELD: a short SET
@@ -296,7 +340,8 @@ final class HandlebarProbe: @unchecked Sendable {
     private func handleSelect() {
         guard onControl != nil else { return }
         let music = AVAudioSession.sharedInstance().isOtherAudioPlaying
-        onLog?("[SET] 收到（播放/暂停 = SET 长按，直接映射）· 此刻其它音频在播 \(music ? "是" : "否")")
+        let action = HandlebarMapping.action(for: .setLong)
+        onLog?("[SET] 收到（播放/暂停 = SET 长按）· 映射 \(action.title) · 此刻其它音频在播 \(music ? "是" : "否")")
         fire(.setLong)
     }
 
@@ -306,9 +351,9 @@ final class HandlebarProbe: @unchecked Sendable {
         guard onControl != nil else { return }
         lastArrow[forward ? 1 : -1] = nil
         let music = AVAudioSession.sharedInstance().isOtherAudioPlaying
-        onLog?("[按键] \(forward ? "下一曲(▼长按)" : "上一曲(▲长按)") 收到 · 此刻其它音频在播 \(music ? "是" : "否")")
         let gesture: HandlebarGesture = forward ? .arrowDownLong : .arrowUpLong
         let action = HandlebarMapping.action(for: gesture)
+        onLog?("[按键] \(forward ? "下一曲(▼长按)" : "上一曲(▲长按)") 收到 · 映射 \(action.title) · 此刻其它音频在播 \(music ? "是" : "否")")
         if action == .none { return }
         fire(gesture)
         guard HandlebarMapping.repeatsWhenHeld, action == .knobNext || action == .knobPrevious else { return }

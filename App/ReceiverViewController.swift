@@ -3528,7 +3528,7 @@ extension ReceiverViewController {
             let running = self.handlebarProbe.isRunning
             let claim = self.handlebarProbe.isNowPlaying
             var sections: [SettingsSection] = [
-                SettingsSection(footer: "只观察、不映射。车把按键是蓝牙 AVRCP，不走 Wi-Fi 投屏链路。iPhone 只把传输键交给「正在播放」的 App，所以要先点下面的「接管正在播放」——混音模式不会暂停音乐。", [
+                SettingsSection(footer: "只观察、不映射。车把按键是蓝牙 AVRCP，不走 Wi-Fi 投屏链路。iPhone 只把传输键交给「正在播放」的 App。▲▼ 单击/双击走音量通道，锁屏、音乐播放中都可用；SET 与 ▲▼ 长按是传输键，音乐播放时归音乐 App。默认只用 4 个音量手势，无需「接管正在播放」。", [
                     .action(running ? "停止探测" : "开始探测",
                             icon: (running ? "stop.circle.fill" : "play.circle.fill", running ? .systemRed : .systemGreen)) {
                         if running { self.handlebarProbe.stop() } else { self.handlebarProbe.start() }
@@ -3583,7 +3583,7 @@ extension ReceiverViewController {
             if gesture.isUnavailable { row.subtitle = { "车机自己消费这个按键，手机收不到" } }
             return row
         }
-        return SettingsSection("按键映射", footer: "左边是车把动作，右边是要发给 CarPlay 的操作。▲▼ 短按走音量通道（会自动把音量拨回），长按走上一曲/下一曲通道，双击是固件合并后的大跳变。SET 只有长按能到手机（以播放/暂停形式），短按/双击与 BACK 都被车机自己占用，无法用于投屏。", rows)
+        return SettingsSection("按键映射", footer: "左边是车把动作，右边是要发给 CarPlay 的操作。默认只用 ▲▼ 单击/双击这 4 个音量手势（自动拨回音量）；SET 长按与 ▲▼ 长按是传输键，音乐播放时归音乐 App，默认「不执行」；SET 短按/双击与 BACK 被车机自己占用，手机收不到。", rows)
     }
 
     /// How long a double is, and whether a held arrow keeps scrolling.

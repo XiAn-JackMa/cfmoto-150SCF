@@ -86,20 +86,20 @@ enum HandlebarMapping {
     private static let key = "handlebarMapping"
     private static let timingKey = "handlebarTiming"
 
-    /// Defaults chosen from the measurement and the owner's manual: ▲▼ short is the wheel (that is
-    /// what the manual calls it on the dash's own menus), ▲▲/▼▼ are Siri and answer/hang-up, ▲▼ long
-    /// is Back and Home, and SET long (the only SET the phone receives, as play/pause) is Select.
-    /// Everything below can be replaced from 设置 → 车把按键.
+    /// Defaults for the non-touch dash: only the four volume-channel gestures are wired, because they
+    /// arrive with the phone locked and while music is playing. SET long and ▲▼ long are transport
+    /// keys that the music app owns during playback, so they default to `.none` (handed back to the
+    /// music) but stay configurable here. Everything can be replaced from 设置 → 车把按键.
     static let defaults: [HandlebarGesture: HandlebarAction] = [
         .arrowUpShort: .knobPrevious,
         .arrowDownShort: .knobNext,
-        .arrowUpLong: .back,
-        .arrowDownLong: .home,
-        .arrowUpDouble: .siri,
-        .arrowDownDouble: .hookSwitch,
-        .setLong: .select,
-        .setShort: .select,
-        .setDouble: .back
+        .arrowUpDouble: .select,
+        .arrowDownDouble: .back,
+        .arrowUpLong: .none,
+        .arrowDownLong: .none,
+        .setLong: .none,
+        .setShort: .none,
+        .setDouble: .none
     ]
 
     static func action(for gesture: HandlebarGesture) -> HandlebarAction {
