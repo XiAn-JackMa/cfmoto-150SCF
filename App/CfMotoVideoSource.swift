@@ -37,6 +37,8 @@ struct CfMotoLiveStats {
     var keyframeRatio: Double = 0
     var averageFrameKB: Double = 0
     var counters = ""
+    /// Latest static-pad outcome, shown under the bitrate when the pad is enabled.
+    var staticPadNote = ""
     /// False until a picture has actually been served, which is what separates "CarPlay has
     /// nothing new to show" from "CarPlay never started".
     var hasPicture = false
@@ -185,6 +187,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Cached copy of CfMotoTuning.staticPadEnabled: the pull path runs many times a second and a
     /// UserDefaults read per pull is not free. Refreshed whenever the tuning is applied.
     private var staticPadOn = false
+    /// Latest static-pad outcome, for the line under the bitrate readout.
+    private var lastPadNote = ""
     /// Cached copies of the pull-path tuning values, read once when the tuning is applied instead
     /// of on every pull.
     private var bufferDepth = 6
@@ -196,6 +200,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// The dash keeps no cadence of its own, so without this the serve rate is whatever our reply
     /// latency allows (measured 51-116 pulls/s on a real 150SCF).
     private var serveInterval: TimeInterval = 0.05
+    /// Idle pacing: once the picture has been unchanged for `staticIdleSeconds`, serve at most
+    /// this rate. 5 fps is plenty for a static screen and cuts the idle bitrate fourfold, which
+    /// the static pad alone cannot guarantee for detailed content.
+    private let staticPaceInterval: TimeInterval = 1.0 / 5.0
     /// Uptime of the last frame handed to the dash; the pacing above measures from here.
     private var lastServeAt: TimeInterval = 0
 
@@ -445,6 +453,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             // A pad that is not clearly smaller is not worth a second encode: reuse the normal
             // keyframe instead, and do not try again for this picture.
             let useful = fullSize == 0 || padSize * 10 <= fullSize * 7
+            lastPadNote = useful
+                ? "轻量包 \(padSize / 1024) KB（正常关键帧 \(fullSize / 1024) KB）"
+                : "轻量包 \(padSize / 1024) KB 未省 30%（正常 \(fullSize / 1024) KB）"
             padKeyframeAU = useful ? frame.data : nil
             padGeneration = generation
             if !useful { padRejectedGeneration = generation }
@@ -598,12 +609,17 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
         let frame = await serveFrame(timeout: timeout)
         lock.lock()
-        let interval = serveInterval
+        let normal = serveInterval
+        let idle = lastPictureUptime > 0 ? ProcessInfo.processInfo.systemUptime - lastPictureUptime : 0
+        let staticIdle = staticIdleSeconds
         let last = lastServeAt
         lock.unlock()
         // Pace even an empty answer: a dash that gets nothing retries immediately, which would
         // spin the link at full speed through the first moments of a session.
-        if interval > 0, last > 0 {
+        // 静止降节奏：画面空闲超过静止判定时长后，把节奏降到 staticPaceInterval（默认 5 fps），
+        // 码率按比例下降；画面一动，下一次送帧立刻回到正常节奏。
+        let interval = idle >= staticIdle ? max(normal, staticPaceInterval) : normal
+        if last > 0 {
             let wait = interval - (ProcessInfo.processInfo.systemUptime - last)
             if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
         }
@@ -856,6 +872,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             paddedRatio: servedCount > 0 ? Double(repeatedCount) / Double(servedCount) : 0,
             keyframeRatio: servedCount > 0 ? Double(servedKeyframes) / Double(servedCount) : 0,
             averageFrameKB: servedCount > 0 ? Double(servedBytes) / Double(servedCount) / 1024 : 0,
+            staticPadNote: lastPadNote,
             counters: countersLocked(),
             hasPicture: servedCount > 0)
     }

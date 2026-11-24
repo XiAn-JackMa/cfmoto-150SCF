@@ -1223,11 +1223,18 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             return
         }
         let s = receiver.cfmotoLiveStats
-        outputInfoLabel.text = [
-            String(format: "车机 %@ · %.1f fps · %.1f Mbps", s.canvasSize, s.servedFPS, s.bitrateMbps),
-            "CarPlay \(s.carPlaySize) · \(s.scaleText == "1:1" ? "不缩放" : "缩放 \(s.scaleText)")",
-            "重复画面 \(Int(s.paddedRatio * 100))% · 关键帧 \(Int(s.keyframeRatio * 100))% · 每帧 \(String(format: "%.1f", s.averageFrameKB)) KB"
-        ].joined(separator: "\n")
+        var infoLines = [
+            String(format: "车机 %@ · %.1f fps · %.1f Mbps", s.canvasSize, s.servedFPS, s.bitrateMbps)
+        ]
+        if CfMotoTuning.staticPadEnabled {
+            infoLines.append(s.staticPadNote.isEmpty ? "静止补帧：等待静止…" : "静止补帧：\(s.staticPadNote)")
+        }
+        infoLines.append("CarPlay \(s.carPlaySize) · \(s.scaleText == "1:1" ? "不缩放" : "缩放 \(s.scaleText)")")
+        let repeatedKeyframe = Int(s.paddedRatio * 100)
+        let freshKeyframe = max(0, Int((s.keyframeRatio - s.paddedRatio) * 100))
+        let freshP = max(0, Int((1.0 - s.keyframeRatio) * 100))
+        infoLines.append("重复关键帧 \(repeatedKeyframe)% · 新压关键帧 \(freshKeyframe)% · 新画面 P 帧 \(freshP)% · 每帧 \(String(format: "%.1f", s.averageFrameKB)) KB")
+        outputInfoLabel.text = infoLines.joined(separator: "\n")
         outputInfoLabel.isHidden = false
         // What CarPlay produces, as opposed to what the dash receives (the line under the button).
         // A gap between the two rates is the dash pulling faster than CarPlay delivers, which is
