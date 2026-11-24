@@ -1351,7 +1351,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         let source = outputMode != .browser ? headUnitOutput.selectedTitle
             : followsCarScreen ? (screen.map { "车机屏幕 \($0.title)" } ?? "尚无车机屏幕，用固定分辨率") : "固定尺寸"
-        log("画面计划：\(plan.width)×\(plan.height) @ \(plan.fps) FPS \(plan.codec.displayName)（\(source)\(lightLevel > 0 ? "，减轻档 \(lightLevel)" : "")）")
+        let pacingNote = outputMode == .cfmoto ? " · 发送限速 \(CfMotoTuning.frameRate) fps" : ""
+        log("画面计划：\(plan.width)×\(plan.height) @ \(plan.fps) FPS \(plan.codec.displayName)（\(source)\(lightLevel > 0 ? "，减轻档 \(lightLevel)" : "")）\(pacingNote)")
         logSettingsSnapshot(plan)
         config.browserAudio = soundOutput == .browser && config.videoOutputPort != nil && outputMode == .browser
         if outputMode == .airPlay, config.videoOutputPort != nil { config.airPlayStreamID = UUID() }
@@ -2103,9 +2104,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         cfmotoPortField.isEnabled = value
         // Live toggle: it must stay tappable while the link runs, unlike the address fields.
         cfmotoTestSwitch.isEnabled = true
-        for field in [cfmotoBitrateField, cfmotoFPSField, cfmotoKeyframeField, cfmotoCanvasWaitField, cfmotoCanvasOverrideField] {
+        for field in [cfmotoBitrateField, cfmotoFPSField, cfmotoCanvasWaitField, cfmotoCanvasOverrideField] {
             field.isEnabled = value
         }
+        // With all-intra on, every frame is a keyframe, so the interval has nothing to do.
+        cfmotoKeyframeField.isEnabled = value && !CfMotoTuning.allIntra
         cfmotoBaselineSwitch.isEnabled = value
         cfmotoStaticPadSwitch.isEnabled = value
         cfmotoBufferDepthField.isEnabled = value
@@ -2390,13 +2393,16 @@ extension ReceiverViewController {
         cfmotoTestSwitch.addTarget(self, action: #selector(cfmotoTestPatternChanged), for: .valueChanged)
         cfmotoPortField.keyboardType = .numberPad
         cfmotoPortField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
-        for field in [cfmotoBitrateField, cfmotoKeyframeField, cfmotoCanvasWaitField] {
+        for field in [cfmotoBitrateField, cfmotoKeyframeField, cfmotoCanvasWaitField, cfmotoIDRWaitField, cfmotoStaticIdleField] {
             field.borderStyle = .none; field.textAlignment = .right; field.keyboardType = .decimalPad
             field.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
         }
         cfmotoFPSField.borderStyle = .none; cfmotoFPSField.textAlignment = .right
         cfmotoFPSField.keyboardType = .numberPad
         cfmotoFPSField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
+        cfmotoBufferDepthField.borderStyle = .none; cfmotoBufferDepthField.textAlignment = .right
+        cfmotoBufferDepthField.keyboardType = .numberPad
+        cfmotoBufferDepthField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
         cfmotoCanvasOverrideField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
         cfmotoBaselineSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         cfmotoStaticPadSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
@@ -2484,6 +2490,7 @@ extension ReceiverViewController {
         cfmotoBitrateField.text = String(format: "%.1f", CfMotoTuning.bitrateMbps)
         cfmotoFPSField.text = "\(CfMotoTuning.frameRate)"
         cfmotoKeyframeField.text = String(format: "%.1f", CfMotoTuning.keyframeSeconds)
+        cfmotoKeyframeField.isEnabled = !CfMotoTuning.allIntra
         cfmotoCanvasWaitField.text = String(format: "%.0f", CfMotoTuning.canvasWaitSeconds)
         cfmotoCanvasOverrideField.text = CfMotoTuning.canvasOverride ?? ""
         cfmotoBaselineSwitch.isOn = CfMotoTuning.forceBaseline
@@ -3241,9 +3248,9 @@ extension ReceiverViewController {
                         "「等关键帧上限」：解码器等关键帧超过这个时间就先发缓存画面顶着，同时向 CarPlay 要一个新的。" +
                         "「静止判定」：画面要静止多久才算真的静止（只影响轻量补帧）。" +
                         "「强制全关键帧」：每一帧都当关键帧编码。带宽大约翻倍，但彻底消除撕裂和等关键帧卡顿——" +
-                        "画面撕裂一直存在的话，打开这一项；画面正常就别开。", [
+                        "画面撕裂一直存在的话，打开这一项；画面正常就别开。开启后「关键帧间隔」不再起作用。", [
                     .field("码率（Mbps）", cfmotoBitrateField, placeholder: "2.5"),
-                    .field("帧率上限", cfmotoFPSField, placeholder: "30"),
+                    .field("帧率上限（10–40）", cfmotoFPSField, placeholder: "30"),
                     .field("关键帧间隔（秒）", cfmotoKeyframeField, placeholder: "1.0"),
                     .field("启动等待画布（秒）", cfmotoCanvasWaitField, placeholder: "4"),
                     .field("固定画布（留空跟随车机）", cfmotoCanvasOverrideField, placeholder: "1024x512"),

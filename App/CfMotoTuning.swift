@@ -71,8 +71,8 @@ enum CfMotoTuning {
         let main = bitrateMbps * 1_000_000
         // 800 kbit/s is the ceiling that actually made a lone keyframe small; tying the pad to the
         // main bitrate only made the pad grow with it (a 6 Mbit/s session produced 40 KB pads).
-        // Never above three quarters of the main rate, so the pad is always the cheaper frame.
-        return max(400_000, min(800_000, min(Int(main * 0.25), Int(main * 0.75))))
+        // A quarter of the main rate, clamped to 400-800 kbit/s, so the pad is always the cheaper frame.
+        return max(400_000, min(800_000, Int(main * 0.25)))
     }
 
     static var staticPadMbps: Double { Double(staticPadBitrate) / 1_000_000 }
@@ -139,7 +139,7 @@ enum CfMotoTuning {
     /// whatever it produces beyond that rate is either held (smoother, later) or dropped
     /// (current, earlier). This is that trade-off as one number.
     static var bufferDepth: Int {
-        get { Int(clamp(Double((defaults.object(forKey: Key.bufferDepth) as? Int) ?? 6), 2, 20)) }
+        get { Int(clamp(Double(int(for: .bufferDepth, fallback: 6)), 2, 20)) }
         set { defaults.set(Int(clamp(Double(newValue), 2, 20)), forKey: Key.bufferDepth) }
     }
 
@@ -148,7 +148,7 @@ enum CfMotoTuning {
     /// Short asks CarPlay for a new keyframe sooner; long leaves it alone. Either way the dash is
     /// answered, because a locked-step pull that gets nothing parks for nine seconds.
     static var idrWaitSeconds: Double {
-        get { clamp((defaults.object(forKey: Key.idrWait) as? Double) ?? 2.0, 0.5, 10) }
+        get { clamp(double(for: .idrWait, fallback: 2.0), 0.5, 10) }
         set { defaults.set(clamp(newValue, 0.5, 10), forKey: Key.idrWait) }
     }
 
@@ -159,7 +159,7 @@ enum CfMotoTuning {
     /// Shorter reacts sooner but treats the gap between two frames of live video as "static";
     /// longer is conservative. Only matters while the pad is on.
     static var staticIdleSeconds: Double {
-        get { clamp((defaults.object(forKey: Key.staticIdle) as? Double) ?? 0.35, 0.15, 2) }
+        get { clamp(double(for: .staticIdle, fallback: 0.35), 0.15, 2) }
         set { defaults.set(clamp(newValue, 0.15, 2), forKey: Key.staticIdle) }
     }
 
@@ -193,13 +193,15 @@ enum CfMotoTuning {
                           bufferDepth, idrWait, staticIdle, allIntra]
     }
 
-    private enum Field { case bitrate, frameRate, keyframe, baseline, canvasWait }
+    private enum Field { case bitrate, frameRate, keyframe, canvasWait, idrWait, staticIdle, bufferDepth }
 
     private static func double(for field: Field, fallback: Double) -> Double {
         switch field {
         case .bitrate: return defaults.object(forKey: Key.bitrate) as? Double ?? fallback
         case .keyframe: return defaults.object(forKey: Key.keyframe) as? Double ?? fallback
         case .canvasWait: return defaults.object(forKey: Key.canvasWait) as? Double ?? fallback
+        case .idrWait: return defaults.object(forKey: Key.idrWait) as? Double ?? fallback
+        case .staticIdle: return defaults.object(forKey: Key.staticIdle) as? Double ?? fallback
         default: return fallback
         }
     }
@@ -207,6 +209,7 @@ enum CfMotoTuning {
     private static func int(for field: Field, fallback: Int) -> Int {
         switch field {
         case .frameRate: return defaults.object(forKey: Key.frameRate) as? Int ?? fallback
+        case .bufferDepth: return defaults.object(forKey: Key.bufferDepth) as? Int ?? fallback
         default: return fallback
         }
     }

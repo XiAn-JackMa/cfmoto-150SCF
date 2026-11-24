@@ -383,11 +383,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         }
         padLock.lock()
         defer { padLock.unlock() }
-        // Another pull may have produced it while this one waited.
+        // Another pull may have produced it while this one waited; a rejected pad is remembered
+        // so the same picture is not re-encoded on every idle pull.
         if lock.withLock({ padGeneration == generation }), let cached = lock.withLock({ padKeyframeAU }) {
             return cached
-        if lock.withLock({ padRejectedGeneration == generation }) { return nil }
         }
+        if lock.withLock({ padRejectedGeneration == generation }) { return nil }
         let key = "\(canvas.width)x\(canvas.height)"
         lock.lock()
         var retiredPad: H264Encoder?
