@@ -817,10 +817,14 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         controlBrowser.onLog = { [weak self] in self?.log($0) }
         // Handlebar probe: show every raw event, and keep it in the log so it survives a crash.
+        // `log` touches UIKit, so route it through main like the handlebar view: the volume
+        // observation can fire on a non-main thread.
         handlebarProbe.onLog = { [weak self] line in
             guard let self else { return }
-            DispatchQueue.main.async { self.appendHandlebarLine(line) }
-            self.log(line)
+            DispatchQueue.main.async {
+                self.appendHandlebarLine(line)
+                self.log(line)
+            }
         }
         // Once the probe holds Now Playing, its events also drive CarPlay.
         handlebarProbe.onControl = { [weak self] control in self?.receiver.press(control) }

@@ -57,6 +57,10 @@ final class HandlebarProbe: @unchecked Sendable {
     private var selectHoldTimer: Timer?
     private var selectFired: [(tap: Date, action: CarPlayControl)] = []
     private var lastSelectAt: Date?
+    /// Monotonic event counter and last-event time, so every raw line shows its own timing relative
+    /// to the previous press - that is what tells a single from a double in the log.
+    private var eventSequence = 0
+    private var lastEventAt: Date?
 
     private let lock = NSLock()
     private var samples: [HandlebarRawSample] = []
@@ -66,12 +70,19 @@ final class HandlebarProbe: @unchecked Sendable {
     private(set) var isRunning = false
 
     private func record(_ source: String, _ detail: String = "") {
-        let sample = HandlebarRawSample(date: Date(), source: source, detail: detail)
+        let now = Date()
+        let seq: Int
+        let delta: String
         lock.lock()
+        eventSequence += 1
+        seq = eventSequence
+        delta = lastEventAt.map { String(format: "+%.0fms", now.timeIntervalSince($0) * 1000) } ?? "首个"
+        lastEventAt = now
+        let sample = HandlebarRawSample(date: now, source: source, detail: detail)
         samples.append(sample)
         if samples.count > 60 { samples.removeFirst(samples.count - 60) }
         lock.unlock()
-        onLog?("[按键] \(source)\(detail.isEmpty ? "" : " · \(detail)")")
+        onLog?("[按键 #\(seq) \(delta)] \(source)\(detail.isEmpty ? "" : " · \(detail)")")
         DispatchQueue.main.async { [weak self] in self?.onSample?(sample) }
     }
 
@@ -229,17 +240,21 @@ final class HandlebarProbe: @unchecked Sendable {
         let now = Date()
 
         if steps >= Float(0.075) {
+            // The firmware merged a fast double into one bigger step.
             lastArrow.removeAll()
+            onLog?("[手势] 步进 \(String(format: "%.3f", steps)) ≥ 0.075，固件已合并 → 双击")
             fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
             return
         }
 
         if let last = lastArrow[direction], now.timeIntervalSince(last) < HandlebarMapping.doubleTapWindow {
             lastArrow.removeAll()
+            onLog?("[手势] 与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last) * 1000))ms < 双击窗口 \(String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000))ms → 双击")
             fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
             return
         }
         lastArrow[direction] = now
+        onLog?("[手势] 记录 \(direction > 0 ? "▲" : "▼") 单击，进入双击窗口")
         fire(direction > 0 ? .arrowUpShort : .arrowDownShort)
     }
 
@@ -250,16 +265,23 @@ final class HandlebarProbe: @unchecked Sendable {
     /// `outputVolume`, and the change it makes is filtered out so it is not taken for another press.
     private func restoreVolume(direction: Int, steps: Float) {
         let session = AVAudioSession.sharedInstance()
-        let target = max(0, min(1, session.outputVolume - (direction > 0 ? steps : -steps)))
+        let current = session.outputVolume
+        let target = max(0, min(1, current - (direction > 0 ? steps : -steps)))
         restoringVolume = true
+        onLog?("[回拨] 音量 \(String(format: "%.3f", current)) → \(String(format: "%.3f", target))（\(direction > 0 ? "↑" : "↓") 回拨 \(String(format: "%.3f", steps))）")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            var foundSlider = false
             let slider = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
             for view in slider.subviews {
                 guard let control = view as? UISlider else { continue }
                 control.value = target
                 control.sendActions(for: .touchUpInside)
+                foundSlider = true
                 break
+            }
+            if !foundSlider {
+                self.onLog?("[回拨] 未找到音量 slider，音量可能没有拨回")
             }
             // The write echoes back through the observer; ignore it, then allow presses again.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.restoringVolume = false }
@@ -275,22 +297,26 @@ final class HandlebarProbe: @unchecked Sendable {
             selectHoldTimer?.invalidate(); selectHoldTimer = nil
             selectDown = nil
             selectFired.removeAll()
+            onLog?("[SET] 与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last.tap) * 1000))ms → 双击")
             fire(.setDouble)
             return
         }
         selectDown = now
+        onLog?("[SET] 收到按下：\(String(format: "%.2f", HandlebarMapping.holdDelay))s 后判长按，0.12s 后判单击")
         selectHoldTimer?.invalidate()
         selectHoldTimer = Timer.scheduledTimer(withTimeInterval: HandlebarMapping.holdDelay, repeats: false) {
             [weak self] _ in
             guard let self, self.selectDown != nil else { return }
             self.selectDown = nil
             self.selectFired.removeAll()
+            self.onLog?("[SET] 长按计时触发（\(String(format: "%.2f", HandlebarMapping.holdDelay))s）")
             self.fire(.setLong)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self, self.selectDown != nil else { return }
             self.selectDown = nil
             self.selectHoldTimer?.invalidate(); self.selectHoldTimer = nil
+            self.onLog?("[SET] 0.12s 判定为单击（长按计时器已取消）")
             self.selectFired.append((Date(), .select))
             self.fire(.setShort)
         }
