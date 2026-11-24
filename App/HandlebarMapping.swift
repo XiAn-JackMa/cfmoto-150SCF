@@ -137,11 +137,12 @@ enum HandlebarMapping {
 
     // MARK: - Timing
 
-    /// How long a second press on the same arrow still counts as a double, in seconds.
+    /// How long a second press on the same arrow still counts as a double, in seconds. 0.2 s keeps
+    /// single presses snappy; a rider who wants a calmer double can raise it from 设置 → 车把按键.
     static var doubleTapWindow: TimeInterval {
         get {
             let stored = UserDefaults.standard.double(forKey: timingKey)
-            return stored > 0 ? stored : 0.55
+            return stored > 0 ? stored : 0.20
         }
         set { UserDefaults.standard.set(newValue, forKey: timingKey) }
     }

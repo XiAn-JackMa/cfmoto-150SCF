@@ -173,6 +173,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoIDRWaitField = UITextField()
     private let cfmotoStaticIdleField = UITextField()
     private let cfmotoAllIntraSwitch = UISwitch()
+    private let handlebarDoubleWindowField = UITextField()
     private let cfmotoTuningStatus = UILabel()
     private let cfmotoStatus = StatusLabel()
     /// Every EasyConn line in one scrollable, selectable field: a one-line label cannot be read or
@@ -2422,6 +2423,8 @@ extension ReceiverViewController {
         cfmotoBaselineSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         cfmotoStaticPadSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         cfmotoAllIntraSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
+        handlebarDoubleWindowField.keyboardType = .numberPad
+        handlebarDoubleWindowField.addTarget(self, action: #selector(handlebarDoubleWindowChanged), for: .editingDidEnd)
         syncCfMotoTuningFields()
         if let crash = CrashCatcher.previousException() {
             // The previous run died of an exception; that text is the only trace on a sideloaded build.
@@ -3588,11 +3591,7 @@ extension ReceiverViewController {
 
     /// How long a double is, and whether a held arrow keeps scrolling.
     private func handlebarTimingSection() -> SettingsSection {
-        let doubles = Self.handlebarTimingValues
-        let doubleMenu = ChoiceMenu(items: doubles.map(\.0))
-        doubleMenu.selectedSegmentIndex = doubles.firstIndex { abs($0.1 - HandlebarMapping.doubleTapWindow) < 0.01 } ?? 2
-        doubleMenu.tag = Self.handlebarDoubleTapTag
-        doubleMenu.addTarget(self, action: #selector(handlebarTimingChanged(_:)), for: .valueChanged)
+        handlebarDoubleWindowField.text = "\(Int((HandlebarMapping.doubleTapWindow * 1000).rounded()))"
         let repeatSwitch = UISwitch()
         repeatSwitch.isOn = HandlebarMapping.repeatsWhenHeld
         repeatSwitch.addAction(UIAction { [weak self] _ in
@@ -3600,8 +3599,8 @@ extension ReceiverViewController {
             self?.log("车把长按连发：\(repeatSwitch.isOn ? "开" : "关")")
         }, for: .valueChanged)
 
-        return SettingsSection("手势与时序", footer: "双击窗口：两次按键隔多久仍算「双击」。长按连发只影响映射为上一项/下一项的长按。", [
-            .control("双击窗口", icon: ("hand.tap.fill", .systemTeal), doubleMenu),
+        return SettingsSection("手势与时序", footer: "双击窗口（毫秒）：两次按键隔多久仍算「双击」。填小一点单击更跟手，但双击要按得更快；范围 100–2000。长按连发只影响映射为上一项/下一项的长按。", [
+            .field("双击窗口（毫秒）", handlebarDoubleWindowField, placeholder: "200"),
             .control("长按连发", icon: ("arrow.triangle.2.circlepath", .systemGreen), repeatSwitch),
             .action("恢复默认映射", icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
                 HandlebarMapping.reset()
@@ -3611,10 +3610,6 @@ extension ReceiverViewController {
         ])
     }
 
-    private static let handlebarDoubleTapTag = 9001
-    private static let handlebarTimingValues: [(String, TimeInterval)] = [
-        ("0.35 秒", 0.35), ("0.45 秒", 0.45), ("0.55 秒", 0.55), ("0.80 秒", 0.80)
-    ]
     private static func handlebarGestureTag(_ gesture: HandlebarGesture) -> Int {
         9100 + (HandlebarGesture.allCases.firstIndex(of: gesture) ?? 0)
     }
@@ -3632,12 +3627,20 @@ extension ReceiverViewController {
         log("车把映射：\(gesture.title) → \(action.title)")
     }
 
-    @objc private func handlebarTimingChanged(_ sender: ChoiceMenu) {
-        let index = sender.selectedSegmentIndex
-        guard sender.tag == Self.handlebarDoubleTapTag,
-              Self.handlebarTimingValues.indices.contains(index) else { return }
-        HandlebarMapping.doubleTapWindow = Self.handlebarTimingValues[index].1
-        log("双击窗口：\(Self.handlebarTimingValues[index].0)")
+    @objc private func handlebarDoubleWindowChanged() {
+        let text = (handlebarDoubleWindowField.text ?? "").trimmingCharacters(in: .whitespaces)
+        guard let ms = Double(text), ms.isFinite else {
+            syncHandlebarDoubleWindowField()
+            return
+        }
+        let clamped = min(2000, max(100, ms))
+        HandlebarMapping.doubleTapWindow = clamped / 1000
+        log("双击窗口：\(Int(clamped.rounded())) 毫秒")
+        syncHandlebarDoubleWindowField()
+    }
+
+    private func syncHandlebarDoubleWindowField() {
+        handlebarDoubleWindowField.text = "\(Int((HandlebarMapping.doubleTapWindow * 1000).rounded()))"
     }
 
     private func appendHandlebarLine(_ line: String) {
