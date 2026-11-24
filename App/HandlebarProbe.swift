@@ -14,7 +14,8 @@
 //   enter     togglePlayPauseCommand (sometimes a bare next/previous arrives instead).
 //   holds     none: the dash never sends seek/FAST_FORWARD, so no key has a real press/release pair.
 // So ▲▼ turn the wheel, a merged double steps once and then goes Back (a way out of a screen), enter
-// selects with a timed hold for Home, and a bare track key is treated as the same notch.
+// (which arrives only as play/pause = the held press) maps straight to Select, and a bare track key
+// is treated as the same notch.
 
 import AVFoundation
 import Foundation
@@ -53,10 +54,6 @@ final class HandlebarProbe: @unchecked Sendable {
     private var heldRepeatCount = 0
     private let heldRepeatInterval: TimeInterval = 0.12
     private let heldRepeatLimit = 40
-    private var selectDown: Date?
-    private var selectHoldTimer: Timer?
-    private var selectFired: [(tap: Date, action: CarPlayControl)] = []
-    private var lastSelectAt: Date?
     /// Monotonic event counter and last-event time, so every raw line shows its own timing relative
     /// to the previous press - that is what tells a single from a double in the log.
     private var eventSequence = 0
@@ -67,6 +64,10 @@ final class HandlebarProbe: @unchecked Sendable {
     private var commandTargets: [(MPRemoteCommand, Any)] = []
     private var volumeObservation: NSKeyValueObservation?
     private var silent: AVAudioPlayer?
+    private var nowPlayingObservers: [NSObjectProtocol] = []
+    private var nowPlayingWatchdog: Timer?
+    private var nowPlayingRestarts = 0
+    private var nowPlayingTicks = 0
     private(set) var isRunning = false
 
     private func record(_ source: String, _ detail: String = "") {
@@ -122,7 +123,7 @@ final class HandlebarProbe: @unchecked Sendable {
         volumeObservation?.invalidate()
         volumeObservation = nil
         repeatTimer?.invalidate(); repeatTimer = nil
-        selectHoldTimer?.invalidate(); selectHoldTimer = nil
+        stopNowPlayingKeepAlive()
         silent?.stop()
         silent = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
@@ -288,38 +289,15 @@ final class HandlebarProbe: @unchecked Sendable {
         }
     }
 
-    /// SET long press = play/pause on this dash, so it is the only clean "enter" we get: a short
-    /// pause here is treated as Select, holding it reaches Home.
+    /// SET reaches the phone only as a play/pause command, and only when SET is HELD: a short SET
+    /// opens the dash's own settings menu and the phone never sees it. So the play/pause event here
+    /// IS the long press — there is no press/release pair to time, and the old 0.12 s / 0.60 s
+    /// timers always resolved to "short" before the hold could ever fire.
     private func handleSelect() {
         guard onControl != nil else { return }
-        let now = Date()
-        if let last = selectFired.last, now.timeIntervalSince(last.tap) < HandlebarMapping.doubleTapWindow {
-            selectHoldTimer?.invalidate(); selectHoldTimer = nil
-            selectDown = nil
-            selectFired.removeAll()
-            onLog?("[SET] 与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last.tap) * 1000))ms → 双击")
-            fire(.setDouble)
-            return
-        }
-        selectDown = now
-        onLog?("[SET] 收到按下：\(String(format: "%.2f", HandlebarMapping.holdDelay))s 后判长按，0.12s 后判单击")
-        selectHoldTimer?.invalidate()
-        selectHoldTimer = Timer.scheduledTimer(withTimeInterval: HandlebarMapping.holdDelay, repeats: false) {
-            [weak self] _ in
-            guard let self, self.selectDown != nil else { return }
-            self.selectDown = nil
-            self.selectFired.removeAll()
-            self.onLog?("[SET] 长按计时触发（\(String(format: "%.2f", HandlebarMapping.holdDelay))s）")
-            self.fire(.setLong)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            guard let self, self.selectDown != nil else { return }
-            self.selectDown = nil
-            self.selectHoldTimer?.invalidate(); self.selectHoldTimer = nil
-            self.onLog?("[SET] 0.12s 判定为单击（长按计时器已取消）")
-            self.selectFired.append((Date(), .select))
-            self.fire(.setShort)
-        }
+        let music = AVAudioSession.sharedInstance().isOtherAudioPlaying
+        onLog?("[SET] 收到（播放/暂停 = SET 长按，直接映射）· 此刻其它音频在播 \(music ? "是" : "否")")
+        fire(.setLong)
     }
 
     /// ▲/▼ long press: a clean track key with no volume side effect. A held arrow keeps sending them,
@@ -327,6 +305,8 @@ final class HandlebarProbe: @unchecked Sendable {
     private func handleTrack(forward: Bool) {
         guard onControl != nil else { return }
         lastArrow[forward ? 1 : -1] = nil
+        let music = AVAudioSession.sharedInstance().isOtherAudioPlaying
+        onLog?("[按键] \(forward ? "下一曲(▼长按)" : "上一曲(▲长按)") 收到 · 此刻其它音频在播 \(music ? "是" : "否")")
         let gesture: HandlebarGesture = forward ? .arrowDownLong : .arrowUpLong
         let action = HandlebarMapping.action(for: gesture)
         if action == .none { return }
@@ -360,24 +340,50 @@ final class HandlebarProbe: @unchecked Sendable {
     // MARK: - Now Playing claim (what makes the keys arrive at all)
 
     /// Whether this app currently looks like the "Now Playing" app, which is the condition iOS puts
-    /// on delivering AVRCP transport keys.
+    /// on delivering AVRCP transport keys. `nowPlayingInfo` is the cheap proxy the UI reads; the
+    /// watchdog below also checks that the silent loop is actually still playing, because a cleared
+    /// or interrupted session can keep the info while the keys have already moved to the music app.
     var isNowPlaying: Bool { MPNowPlayingInfoCenter.default().nowPlayingInfo != nil }
 
     /// Publishes Now Playing info and starts a near-silent loop, so the bike sends its keys here
-    /// instead of to the music app. This is the step that pauses other audio; the probe reports
-    /// whether it worked rather than pretending.
+    /// instead of to the music app. Because the loop is mixed (`.mixWithOthers`) it no longer pauses
+    /// the user's music; the probe reports whether the claim worked rather than pretending.
     @discardableResult
     func becomeNowPlaying() -> Bool {
+        logAudioState("接管前")
+        let ok = replaySilentLoop()
+        if ok {
+            let music = AVAudioSession.sharedInstance().isOtherAudioPlaying
+            record("已接管正在播放（混音模式，不暂停音乐）",
+                   music ? "检测到其它音频仍在播" : "当前没有其它音频")
+            startNowPlayingKeepAlive()
+        } else {
+            onLog?("[探测] 接管播放失败（此时车机会继续把按键发给音乐 App）")
+        }
+        return ok
+    }
+
+    /// Rebuilds the silent loop and the Now Playing info. Factored out so the first claim and the
+    /// watchdog's revive share exactly the same path.
+    ///
+    /// Uses `.mixWithOthers` on purpose: the old exclusive `[]` category paused the user's music and
+    /// fought BackgroundKeepAlive for the same session. Mixing keeps music playing and still sets
+    /// `nowPlayingInfo`, which is what the bike's transport keys are supposed to follow.
+    @discardableResult
+    private func replaySilentLoop() -> Bool {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try session.setActive(true)
             let player = try AVAudioPlayer(data: BackgroundKeepAlive.silentLoopData,
                                            fileTypeHint: AVFileType.wav.rawValue)
             player.numberOfLoops = -1
             player.volume = 0.01
             player.prepareToPlay()
-            guard player.play() else { throw ProbeError.loopDidNotStart }
+            guard player.play() else {
+                onLog?("[保活] 静音循环被系统拒绝播放")
+                return false
+            }
             silent = player
             MPNowPlayingInfoCenter.default().nowPlayingInfo = [
                 MPMediaItemPropertyTitle: "CarWithin",
@@ -385,16 +391,92 @@ final class HandlebarProbe: @unchecked Sendable {
                 MPNowPlayingInfoPropertyPlaybackRate: 1.0,
                 MPNowPlayingInfoPropertyIsLiveStream: true
             ]
-            record("已接管正在播放", "车机应把按键发到这里")
+            logAudioState("接管后")
             return true
         } catch {
-            onLog?("[探测] 接管播放失败：\(error.localizedDescription)（此时车机会继续把按键发给音乐 App）")
+            onLog?("[保活] 重建静音循环失败：\(error.localizedDescription)")
             return false
         }
     }
 
-    enum ProbeError: LocalizedError {
-        case loopDidNotStart
-        var errorDescription: String? { "静音循环没有启动" }
+    /// Watches the Now Playing claim. The silent loop is the only thing keeping the bike's keys
+    /// arriving here; if it stops (interruption, route change, another app taking the session) the
+    /// keys silently leak to the music app, so every death is revived and logged with its reason.
+    private func startNowPlayingKeepAlive() {
+        stopNowPlayingKeepAlive()
+        nowPlayingRestarts = 0
+        nowPlayingTicks = 0
+        let center = NotificationCenter.default
+        nowPlayingObservers = [
+            center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+                guard let self else { return }
+                let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
+                let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt ?? 0
+                let kind = AVAudioSession.InterruptionType(rawValue: raw) == .ended ? "结束" : "开始"
+                self.onLog?("[保活] 音频中断：\(kind)（type=\(raw) reason=\(reason)）")
+                self.logAudioState("中断时")
+                if AVAudioSession.InterruptionType(rawValue: raw) == .ended {
+                    self.reviveNowPlaying(reason: "音频中断结束")
+                }
+            },
+            center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.onLog?("[保活] 系统媒体服务重置")
+                self.silent = nil
+                self.reviveNowPlaying(reason: "媒体服务重置")
+            },
+            center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
+                guard let self else { return }
+                let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+                self.onLog?("[保活] 音频路由变化（reason=\(raw)）")
+                self.logAudioState("路由变化时")
+                if self.silent?.isPlaying != true {
+                    self.reviveNowPlaying(reason: "路由变化")
+                }
+            }
+        ]
+        // Catches everything else (session deactivated, category changed, player stopped) — the
+        // observers only cover the events iOS bothers to announce.
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.nowPlayingTicks += 1
+            let playing = self.silent?.isPlaying == true
+            let claimed = MPNowPlayingInfoCenter.default().nowPlayingInfo != nil
+            if !playing || !claimed {
+                self.reviveNowPlaying(reason: playing ? "nowPlayingInfo 丢失" : "静音循环停止")
+            } else if self.nowPlayingTicks % 15 == 0 {
+                self.onLog?("[保活] 心跳正常（第 \(self.nowPlayingTicks) 次检查 · 静音在播 · NowPlaying 已声明 · 其它音频在播 \(AVAudioSession.sharedInstance().isOtherAudioPlaying ? "是" : "否")）")
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        nowPlayingWatchdog = timer
+        onLog?("[保活] 已开始监视 Now Playing（每 2 秒查一次，断了就重建并记录原因）")
+    }
+
+    private func reviveNowPlaying(reason: String) {
+        nowPlayingRestarts += 1
+        logAudioState("恢复前（\(reason)）")
+        let ok = replaySilentLoop()
+        if nowPlayingRestarts <= 3 || nowPlayingRestarts % 10 == 0 {
+            onLog?(ok
+                ? "[保活] 已恢复（\(reason)，第 \(nowPlayingRestarts) 次）"
+                : "[保活] 恢复失败（\(reason)，第 \(nowPlayingRestarts) 次）——车机按键将漏给音乐 App")
+        }
+    }
+
+    private func stopNowPlayingKeepAlive() {
+        nowPlayingWatchdog?.invalidate(); nowPlayingWatchdog = nil
+        nowPlayingObservers.forEach(NotificationCenter.default.removeObserver)
+        nowPlayingObservers = []
+    }
+
+    /// One line with the audio-session facts that decide whether the bike's keys still reach us.
+    private func logAudioState(_ label: String) {
+        let session = AVAudioSession.sharedInstance()
+        let route = session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ",")
+        let options = session.categoryOptions
+        let optionText = options.contains(.mixWithOthers) ? "混音" : (options.isEmpty ? "独占" : String(options.rawValue))
+        let claimed = MPNowPlayingInfoCenter.default().nowPlayingInfo != nil
+        onLog?("[保活] \(label)：类别 \(session.category.rawValue) · 选项 \(optionText)(\(options.rawValue)) · 模式 \(session.mode.rawValue) · 路由 \(route.isEmpty ? "无" : route) · 其它音频在播 \(session.isOtherAudioPlaying ? "是" : "否") · 静音循环在播 \(silent?.isPlaying == true ? "是" : "否") · nowPlayingInfo \(claimed ? "已设" : "空")")
     }
 }

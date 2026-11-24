@@ -44,7 +44,7 @@ enum HandlebarGesture: String, CaseIterable, Codable {
     }
 
     /// Gestures the dash never delivers, so the row can say so instead of looking broken.
-    var isUnavailable: Bool { self == .setShort }
+    var isUnavailable: Bool { self == .setShort || self == .setDouble }
 }
 
 /// What to send to CarPlay. `none` lets a gesture be switched off without inventing something.
@@ -85,20 +85,19 @@ enum HandlebarAction: String, CaseIterable, Codable {
 enum HandlebarMapping {
     private static let key = "handlebarMapping"
     private static let timingKey = "handlebarTiming"
-    private static let repeatKey = "handlebarRepeat"
 
     /// Defaults chosen from the measurement and the owner's manual: ▲▼ short is the wheel (that is
-    /// what the manual calls it on the dash's own menus), ▲▲/▼▼ are the two actions the dash keeps to
-    /// itself (Back and Select, since a short SET and BACK never reach the phone), ▲▼ long repeats,
-    /// and SET long is Home. Everything below can be replaced from 设置 → 车把按键.
+    /// what the manual calls it on the dash's own menus), ▲▲/▼▼ are Siri and answer/hang-up, ▲▼ long
+    /// is Back and Home, and SET long (the only SET the phone receives, as play/pause) is Select.
+    /// Everything below can be replaced from 设置 → 车把按键.
     static let defaults: [HandlebarGesture: HandlebarAction] = [
         .arrowUpShort: .knobPrevious,
         .arrowDownShort: .knobNext,
-        .arrowUpLong: .knobPrevious,
-        .arrowDownLong: .knobNext,
-        .arrowUpDouble: .back,
-        .arrowDownDouble: .select,
-        .setLong: .home,
+        .arrowUpLong: .back,
+        .arrowDownLong: .home,
+        .arrowUpDouble: .siri,
+        .arrowDownDouble: .hookSwitch,
+        .setLong: .select,
         .setShort: .select,
         .setDouble: .back
     ]
@@ -116,7 +115,6 @@ enum HandlebarMapping {
     static func reset() {
         UserDefaults.standard.removeObject(forKey: key)
         UserDefaults.standard.removeObject(forKey: timingKey)
-        UserDefaults.standard.removeObject(forKey: repeatKey)
     }
 
     private static func stored() -> [HandlebarGesture: HandlebarAction] {
@@ -146,15 +144,6 @@ enum HandlebarMapping {
             return stored > 0 ? stored : 0.55
         }
         set { UserDefaults.standard.set(newValue, forKey: timingKey) }
-    }
-
-    /// How long SET must be held before it counts as a hold.
-    static var holdDelay: TimeInterval {
-        get {
-            let stored = UserDefaults.standard.double(forKey: repeatKey)
-            return stored > 0 ? stored : 0.60
-        }
-        set { UserDefaults.standard.set(newValue, forKey: repeatKey) }
     }
 
     /// Whether a held ▲▼ keeps scrolling instead of moving one step.
