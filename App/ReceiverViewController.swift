@@ -172,6 +172,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoBufferDepthField = UITextField()
     private let cfmotoIDRWaitField = UITextField()
     private let cfmotoStaticIdleField = UITextField()
+    private let cfmotoStaticPadMinSavingField = UITextField()
     private let cfmotoAllIntraSwitch = UISwitch()
     private let handlebarDoubleWindowField = UITextField()
     private let cfmotoTuningStatus = UILabel()
@@ -2137,6 +2138,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         cfmotoBufferDepthField.isEnabled = value
         cfmotoIDRWaitField.isEnabled = value
         cfmotoStaticIdleField.isEnabled = value
+        cfmotoStaticPadMinSavingField.isEnabled = value
         cfmotoAllIntraSwitch.isEnabled = value
         carLifeAddressField.isEnabled = value
     }
@@ -2424,6 +2426,9 @@ extension ReceiverViewController {
         cfmotoBufferDepthField.borderStyle = .none; cfmotoBufferDepthField.textAlignment = .right
         cfmotoBufferDepthField.keyboardType = .numberPad
         cfmotoBufferDepthField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
+        cfmotoStaticPadMinSavingField.borderStyle = .none; cfmotoStaticPadMinSavingField.textAlignment = .right
+        cfmotoStaticPadMinSavingField.keyboardType = .numberPad
+        cfmotoStaticPadMinSavingField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
         cfmotoCanvasOverrideField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
         cfmotoBaselineSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         cfmotoStaticPadSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
@@ -2500,6 +2505,7 @@ extension ReceiverViewController {
         if let value = Int(cfmotoBufferDepthField.text ?? "") { CfMotoTuning.bufferDepth = value }
         if let value = number(cfmotoIDRWaitField) { CfMotoTuning.idrWaitSeconds = value }
         if let value = number(cfmotoStaticIdleField) { CfMotoTuning.staticIdleSeconds = value }
+        if let value = Int(cfmotoStaticPadMinSavingField.text ?? "") { CfMotoTuning.staticPadMinSavingPct = value }
         CfMotoTuning.allIntra = cfmotoAllIntraSwitch.isOn
         syncCfMotoTuningFields()
         appendCfMotoLog("画面参数：手动修改：\(before) → \(CfMotoTuning.fullSummary)")
@@ -2520,6 +2526,7 @@ extension ReceiverViewController {
         cfmotoBufferDepthField.text = "\(CfMotoTuning.bufferDepth)"
         cfmotoIDRWaitField.text = String(format: "%.1f", CfMotoTuning.idrWaitSeconds)
         cfmotoStaticIdleField.text = String(format: "%.2f", CfMotoTuning.staticIdleSeconds)
+        cfmotoStaticPadMinSavingField.text = "\(CfMotoTuning.staticPadMinSavingPct)"
         cfmotoAllIntraSwitch.isOn = CfMotoTuning.allIntra
         cfmotoTuningStatus.text = CfMotoTuning.isDefault
             ? "当前为默认参数（2.5 Mbps · 20 fps）"
@@ -3301,6 +3308,7 @@ extension ReceiverViewController {
                     .field("缓存深度（帧）", cfmotoBufferDepthField, placeholder: "6"),
                     .field("等关键帧上限（秒）", cfmotoIDRWaitField, placeholder: "2.0"),
                     .field("静止判定（秒）", cfmotoStaticIdleField, placeholder: "0.35"),
+                    .field("补帧最小节省（%）", cfmotoStaticPadMinSavingField, placeholder: "30"),
                     .control("强制全关键帧", cfmotoAllIntraSwitch),
                     .note(cfmotoTuningStatus),
                     .action("恢复默认参数", icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
@@ -3316,6 +3324,7 @@ extension ReceiverViewController {
                     .note("缓存深度：允许积压的帧数；大 = 顺但延迟，小 = 跟手但易跳帧。"),
                     .note("等关键帧上限：丢关键帧后最多等几秒才用旧图顶。"),
                     .note("静止判定：画面多久不动才算静止（只影响静止补帧）。"),
+                    .note("补帧最小节省：轻量包须比正常关键帧小多少（%）才用它；0 = 只要更小就用。"),
                     .note("全关键帧：每帧都是完整图，彻底消除撕裂，带宽约翻倍。")
                 ]),
             SettingsSection("连接状态", footer: "日志同时写入 Documents/CarWithin-easyconn.log，崩溃或强退都不会丢。车边测试推荐直接「分享日志文件」，可 AirDrop / 微信 / 存到「文件」。", [

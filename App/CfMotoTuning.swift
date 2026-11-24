@@ -78,6 +78,17 @@ enum CfMotoTuning {
 
     static var staticPadMbps: Double { Double(staticPadBitrate) / 1_000_000 }
 
+    /// Minimum size saving the pad must show before it replaces the normal keyframe, in percent.
+    ///
+    /// 0 accepts any pad that is smaller; higher only takes clear savings. Default 30 turned out
+    /// too strict for simple screens: a 14 KB pad against a 19 KB keyframe is 26% and got thrown
+    /// away, after which the normal keyframe was encoded a second time - a visible stutter. Make
+    /// it a knob so each dash's content can pick its own trade-off.
+    static var staticPadMinSavingPct: Int {
+        get { Int(clamp(Double(int(for: .staticPadMinSaving, fallback: 30)), 0, 60)) }
+        set { defaults.set(Int(clamp(Double(newValue), 0, 60)), forKey: Key.staticPadMinSaving) }
+    }
+
     /// Off by default: Main profile (auto level) for leaner compression; on pins Baseline 3.1.
     static var forceBaseline: Bool {
         get { defaults.object(forKey: Key.baseline) as? Bool ?? false }
@@ -117,7 +128,7 @@ enum CfMotoTuning {
     /// Short one-liner for the settings status line.
     static var summary: String {
         let extras = canvasOverrideSize.map { " · 固定画布 \($0.width)×\($0.height)" } ?? ""
-        let pad = staticPadEnabled ? String(format: " · 静止补帧 %.1f Mbps", staticPadMbps) : ""
+        let pad = staticPadEnabled ? String(format: " · 静止补帧 %.1f Mbps · 门槛 %d%%", staticPadMbps, staticPadMinSavingPct) : ""
         let intra = allIntra ? " · 全关键帧" : ""
         return String(format: "%.1f Mbps · %d fps · 关键帧 %.1f 秒 · %@ · 等待画布 %.0f 秒",
                       bitrateMbps, frameRate, keyframeSeconds,
@@ -128,7 +139,7 @@ enum CfMotoTuning {
     /// Every option on one line, for the log.
     static var fullSummary: String {
         let canvas = canvasOverrideSize.map { "\($0.width)×\($0.height)" } ?? "跟随车机"
-        let pad = staticPadEnabled ? String(format: "开（%.1f Mbps）", staticPadMbps) : "关"
+        let pad = staticPadEnabled ? String(format: "开（%.1f Mbps · 门槛 %d%%）", staticPadMbps, staticPadMinSavingPct) : "关"
         return String(format: "码率 %.1f Mbps · 帧率 %d · 关键帧 %.1f 秒 · 等待画布 %.0f 秒 · 固定画布 %@ · Baseline %@ · 静止补帧 %@ · 缓存 %d 帧 · 等关键帧 %.1f 秒 · 静止判定 %.2f 秒 · 全关键帧 %@",
                       bitrateMbps, frameRate, keyframeSeconds, canvasWaitSeconds, canvas,
                       forceBaseline ? "开" : "关", pad, bufferDepth, idrWaitSeconds, staticIdleSeconds,
@@ -196,15 +207,16 @@ enum CfMotoTuning {
         static let canvasWait = "cfmotoTuningCanvasWait"
         static let canvasOverride = "cfmotoTuningCanvasOverride"
         static let staticPad = "cfmotoTuningStaticPad"
+        static let staticPadMinSaving = "cfmotoTuningStaticPadMinSaving"
         static let bufferDepth = "cfmotoTuningBufferDepth"
         static let idrWait = "cfmotoTuningIDRWait"
         static let staticIdle = "cfmotoTuningStaticIdle"
         static let allIntra = "cfmotoTuningAllIntra"
         static let all = [bitrate, frameRate, keyframe, baseline, canvasWait, canvasOverride, staticPad,
-                          bufferDepth, idrWait, staticIdle, allIntra]
+                          staticPadMinSaving, bufferDepth, idrWait, staticIdle, allIntra]
     }
 
-    private enum Field { case bitrate, frameRate, keyframe, canvasWait, idrWait, staticIdle, bufferDepth }
+    private enum Field { case bitrate, frameRate, keyframe, canvasWait, idrWait, staticIdle, bufferDepth, staticPadMinSaving }
 
     private static func double(for field: Field, fallback: Double) -> Double {
         switch field {
@@ -221,6 +233,7 @@ enum CfMotoTuning {
         switch field {
         case .frameRate: return defaults.object(forKey: Key.frameRate) as? Int ?? fallback
         case .bufferDepth: return defaults.object(forKey: Key.bufferDepth) as? Int ?? fallback
+        case .staticPadMinSaving: return defaults.object(forKey: Key.staticPadMinSaving) as? Int ?? fallback
         default: return fallback
         }
     }

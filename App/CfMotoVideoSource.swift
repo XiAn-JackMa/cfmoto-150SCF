@@ -451,11 +451,14 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             let padSize = frame.data.count
             let fullSize = lastKeyframeAU?.count ?? 0
             // A pad that is not clearly smaller is not worth a second encode: reuse the normal
-            // keyframe instead, and do not try again for this picture.
-            let useful = fullSize == 0 || padSize * 10 <= fullSize * 7
+            // keyframe instead, and do not try again for this picture. "Clearly smaller" is the
+            // user-tunable minimum saving, because a simple screen's normal keyframe is already
+            // small and a too-strict gate just encodes the normal frame again after the pad.
+            let minSaving = CfMotoTuning.staticPadMinSavingPct
+            let useful = fullSize == 0 || padSize * 100 <= fullSize * (100 - minSaving)
             lastPadNote = useful
                 ? "轻量包 \(padSize / 1024) KB（正常关键帧 \(fullSize / 1024) KB）"
-                : "轻量包 \(padSize / 1024) KB 未省 30%（正常 \(fullSize / 1024) KB）"
+                : "轻量包 \(padSize / 1024) KB 未省 \(minSaving)%（正常 \(fullSize / 1024) KB）"
             padKeyframeAU = useful ? frame.data : nil
             padGeneration = generation
             if !useful { padRejectedGeneration = generation }
@@ -466,7 +469,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 let now = ProcessInfo.processInfo.systemUptime
                 if now - lastPadRejectLog >= 10 {
                     lastPadRejectLog = now
-                    log?("静止补帧：轻量包 \(padSize / 1024) KB 未比正常关键帧 \(fullSize / 1024) KB 小 30%，改用正常帧（每 10 秒最多提示一次）")
+                    log?("静止补帧：轻量包 \(padSize / 1024) KB 未比正常关键帧 \(fullSize / 1024) KB 小 \(minSaving)%，改用正常帧（每 10 秒最多提示一次）")
                 }
                 return nil
             }
