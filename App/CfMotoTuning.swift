@@ -30,11 +30,14 @@ enum CfMotoTuning {
 
     // MARK: Frame rate
 
-    /// 10 ... 30 fps. This is a ceiling passed to the encoder, not a producer rate: frames are
-    /// encoded when the dash pulls, so the dash still decides the real rate.
+    /// 10 ... 40 fps, and now a real ceiling: the pull path waits `1 / frameRate` between frames.
+    ///
+    /// Before that, the dash kept no cadence of its own and asked for the next frame the instant
+    /// one arrived, so the serve rate was set by our reply latency (51-116 pulls/s measured) and
+    /// this value only told the encoder what to expect.
     static var frameRate: Int {
-        get { Int(clamp(Double(int(for: .frameRate, fallback: 30)), 10, 30)) }
-        set { defaults.set(Int(clamp(Double(newValue), 10, 30)), forKey: Key.frameRate) }
+        get { Int(clamp(Double(int(for: .frameRate, fallback: 30)), 10, 40)) }
+        set { defaults.set(Int(clamp(Double(newValue), 10, 40)), forKey: Key.frameRate) }
     }
 
     // MARK: Keyframes
@@ -53,9 +56,9 @@ enum CfMotoTuning {
 
     /// Answer an idle pull with a smaller keyframe instead of the full-quality one.
     ///
-    /// A dash that pulls 20 times a second while the picture is static gets the same keyframe
-    /// replayed 20 times, so the wire carries pull-rate x keyframe-size: 63 KB at 6 Mbit/s is
-    /// about 10 Mbit/s for a screen that is not even changing. Re-encoding that still picture at
+    /// A still picture means every pull is answered with the same keyframe, so the wire carries
+    /// pull-rate x keyframe-size: 63 KB at 20 fps is 10 Mbit/s for a screen that is not even
+    /// changing. Re-encoding that still picture at
     /// a quarter of the bitrate makes the repeat six times cheaper, at the cost of a softer still
     /// image - which is exactly the picture a rider reads, so it is off by default.
     static var staticPadEnabled: Bool {
@@ -132,8 +135,9 @@ enum CfMotoTuning {
 
     /// 2 ... 20 access units CarPlay may get ahead of the dash before frames are dropped.
     ///
-    /// The dash pulls on a fixed timer, so whatever CarPlay produces beyond that rate is either
-    /// held (smoother, later) or dropped (current, earlier). This is that trade-off as one number.
+    /// Pulls are capped at the configured frame rate but CarPlay may still deliver faster, so
+    /// whatever it produces beyond that rate is either held (smoother, later) or dropped
+    /// (current, earlier). This is that trade-off as one number.
     static var bufferDepth: Int {
         get { Int(clamp(Double((defaults.object(forKey: Key.bufferDepth) as? Int) ?? 6), 2, 20)) }
         set { defaults.set(Int(clamp(Double(newValue), 2, 20)), forKey: Key.bufferDepth) }
@@ -211,3 +215,7 @@ enum CfMotoTuning {
         min(max(value, low), high)
     }
 }
+
+
+
+

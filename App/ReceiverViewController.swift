@@ -1283,6 +1283,56 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let plan = planDisplay(for: targetScreen)
         return CGFloat(plan.height) / CGFloat(plan.width)
     }
+    /// One snapshot of every setting, written to the log whenever a session starts.
+    ///
+    /// Answering "why did the picture look like that on Tuesday" needs the settings that were in
+    /// force at the time. Otherwise the log only records whichever value happened to be mentioned
+    /// while something was going wrong, which is exactly the worse half of the picture.
+    private func logSettingsSnapshot(_ plan: DisplayPlan) {
+        func joined(_ pairs: [(String, String)]) -> String {
+            pairs.map { "\($0.0)=\($0.1)" }.joined(separator: " · ")
+        }
+        let dashIP = (cfmotoAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
+        let port = (cfmotoPortField.text ?? "").trimmingCharacters(in: .whitespaces)
+        log("设置[链路] " + joined([
+            ("输出", headUnitOutput.selectedTitle),
+            ("车机IP", dashIP.isEmpty ? "自动" : dashIP),
+            ("端口", port.isEmpty ? "10930" : port),
+            ("测试图案", cfmotoTestSwitch.isOn ? "开" : "关"),
+            ("记忆画布", UserDefaults.standard.string(forKey: "cfmotoCanvas") ?? "无"),
+            ("日志端口", "\(CfMotoLogServer.defaultPort)")
+        ]))
+        log("设置[画面] " + joined([
+            ("码率", String(format: "%.1f Mbps", CfMotoTuning.bitrateMbps)),
+            ("帧率上限", "\(CfMotoTuning.frameRate) fps"),
+            ("关键帧间隔", String(format: "%.1f 秒", CfMotoTuning.keyframeSeconds)),
+            ("强制Baseline3.1", CfMotoTuning.forceBaseline ? "是" : "否"),
+            ("等待画布", String(format: "%.0f 秒", CfMotoTuning.canvasWaitSeconds)),
+            ("固定画布", CfMotoTuning.canvasOverride ?? "跟随车机"),
+            ("静止补帧", CfMotoTuning.staticPadEnabled
+                ? String(format: "开（%.1f Mbps）", CfMotoTuning.staticPadMbps) : "关"),
+            ("缓存深度", "\(CfMotoTuning.bufferDepth) 帧"),
+            ("等关键帧上限", String(format: "%.1f 秒", CfMotoTuning.idrWaitSeconds)),
+            ("静止判定", String(format: "%.2f 秒", CfMotoTuning.staticIdleSeconds)),
+            ("全关键帧", CfMotoTuning.allIntra ? "开" : "关"),
+            ("是否默认", CfMotoTuning.isDefault ? "是" : "已改")
+        ]))
+        log("设置[CarPlay] " + joined([
+            ("渲染", "\(plan.width)×\(plan.height)"),
+            ("maxFPS", "\(plan.fps)"),
+            ("编码", plan.codec.displayName),
+            ("图标", iconSizeControl.selectedTitle),
+            ("外观", appearanceControl.selectedTitle),
+            ("驾驶位", driveControl.selectedTitle),
+            ("自动重启", autoRestartSwitch.isOn ? "开" : "关"),
+            ("音源", selectedSoundOutput.title)
+        ]))
+        log("设置[后台] " + joined([
+            ("锁屏继续", keepAliveSwitch.isOn ? "开" : "关"),
+            ("画中画", pictureInPictureTiming.selectedTitle)
+        ]))
+    }
+
     private func configureDisplay(_ config: inout ReceiverConfiguration) {
         let screen = targetScreen
         let plan = planDisplay(for: screen)
@@ -1299,6 +1349,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let source = outputMode != .browser ? headUnitOutput.selectedTitle
             : followsCarScreen ? (screen.map { "车机屏幕 \($0.title)" } ?? "尚无车机屏幕，用固定分辨率") : "固定尺寸"
         log("画面计划：\(plan.width)×\(plan.height) @ \(plan.fps) FPS \(plan.codec.displayName)（\(source)\(lightLevel > 0 ? "，减轻档 \(lightLevel)" : "")）")
+        logSettingsSnapshot(plan)
         config.browserAudio = soundOutput == .browser && config.videoOutputPort != nil && outputMode == .browser
         if outputMode == .airPlay, config.videoOutputPort != nil { config.airPlayStreamID = UUID() }
         if outputMode == .zeeho {
@@ -3176,9 +3227,11 @@ extension ReceiverViewController {
             SettingsSection("画面参数（手动覆盖）",
                 footer: "码率默认 2.5 Mbps，是生产版 MOTO-HUB 对仪表盘的取值；CarPlay 的地图细节多，" +
                         "5 GHz 下可以试 4–6 Mbps。关键帧越短，丢帧后恢复越快，也越费流量。" +
+                        "「帧率上限」现在真的限速：车机自己没有节拍，收到一帧就立刻要下一帧，" +
+                        "不限制时会跑到 50–116 帧/秒，把码率摊薄成每帧几个 KB。所以它是清晰度的第一道开关。" +
                         "改了立即生效：编码器重建一次，画面会闪一下。固定画布留空表示跟随车机。" +
-                        "「静止画面用轻量补帧」：车机每秒索要 20 帧，画面不动时会重复同一个关键帧，" +
-                        "所以线路速率 = 20 × 关键帧大小（6 Mbps 时约 63 KB → 约 10 Mbps）。开启后静止时改用" +
+                        "「静止画面用轻量补帧」：画面不动时会重复同一个关键帧，" +
+                        "所以线路速率 = 帧率上限 × 关键帧大小（20 fps、8 Mbps 时约 58 KB → 约 9 Mbps）。开启后静止时改用" +
                         "四分之一码率的小包，带宽降到约三分之一；代价是静止画面（你正在看的地图文字）会变糊。" +
                         "只在需要省流量或降低车机解码压力时打开。" +
                         "「缓存深度」：CarPlay 出得比车机快时允许积压几帧。调小延迟低但容易跳帧，调大更顺但延迟增加。" +
@@ -3696,6 +3749,9 @@ extension ReceiverViewController: PHPickerViewControllerDelegate {
         }
     }
 }
+
+
+
 
 
 

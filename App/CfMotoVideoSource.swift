@@ -58,8 +58,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// One box per decoder: the decoder's output closure captures it for its whole lifetime, so a
     /// per-call box would receive every picture after the first into a box nobody reads.
     private var decodeBox = DecodeBox()
-    /// Latest decoded picture. CarPlay drops to 1-2 fps on a static screen while the dash pulls at
-    /// ~20 fps, so idle pulls are answered by re-encoding this picture instead of returning nothing.
+    /// Latest decoded picture. CarPlay drops to 1-2 fps on a static screen while the pull path
+    /// keeps serving at the configured rate, so idle pulls re-encode this picture instead of
+    /// returning nothing.
     private var latestImage: CVPixelBuffer?
     /// The last picture already letterboxed to the canvas. Scaling runs on the CPU (CIContext with
     /// the software renderer), which cost ~100 ms per pull when idle repeats re-scaled the same
@@ -181,7 +182,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Bumped for every freshly decoded picture, so a cached pad can be checked for staleness.
     private var pictureGeneration = 0
     private var padCount = 0
-    /// Cached copy of CfMotoTuning.staticPadEnabled: the pull path runs 20 times a second and a
+    /// Cached copy of CfMotoTuning.staticPadEnabled: the pull path runs many times a second and a
     /// UserDefaults read per pull is not free. Refreshed whenever the tuning is applied.
     private var staticPadOn = false
     /// Cached copies of the pull-path tuning values, read once when the tuning is applied instead
@@ -190,6 +191,13 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// Every frame is a keyframe: no repeat can reference a picture the dash lost, and no pull
     /// ever waits for a keyframe. Costs roughly double the bitrate.
     private var allIntraOn = false
+    /// Minimum time between two served frames, from the configured frame rate.
+    ///
+    /// The dash keeps no cadence of its own, so without this the serve rate is whatever our reply
+    /// latency allows (measured 51-116 pulls/s on a real 150SCF).
+    private var serveInterval: TimeInterval = 0.05
+    /// Uptime of the last frame handed to the dash; the pacing above measures from here.
+    private var lastServeAt: TimeInterval = 0
 
     /// One line per session describing the stream CarPlay actually produces. It is the first thing
     /// to look at when the picture is wrong: profile, level and reorder depth decide whether a
@@ -283,6 +291,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         bufferDepth = CfMotoTuning.bufferDepth
         idrGiveUpAfter = CfMotoTuning.idrWaitSeconds
         staticIdleSeconds = CfMotoTuning.staticIdleSeconds
+        serveInterval = 1.0 / Double(max(1, CfMotoTuning.frameRate))
         allIntraOn = CfMotoTuning.allIntra
         padEncoder = nil; padCanvasKey = ""; padKeyframeAU = nil; padGeneration = -1
         lock.unlock()
@@ -307,6 +316,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         self.bufferDepth = CfMotoTuning.bufferDepth
         self.idrGiveUpAfter = CfMotoTuning.idrWaitSeconds
         self.staticIdleSeconds = CfMotoTuning.staticIdleSeconds
+        self.serveInterval = 1.0 / Double(max(1, CfMotoTuning.frameRate))
         self.allIntraOn = CfMotoTuning.allIntra
         let sizeChanged = previous == nil || previous!.width != canvas.width || previous!.height != canvas.height
         var retired: H264Encoder?
@@ -568,7 +578,42 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         requestKeyframeIfUseful()
     }
 
+    /// Serves one pull, paced to the configured frame rate.
+    ///
+    /// The dash has no cadence of its own: it sends the next REQ_RV_DATA_NEXT the moment a frame
+    /// arrives, so our reply latency *is* its frame rate. Measured on a real 150SCF - 92-116 pulls
+    /// per second when a P-frame reply took ~10 ms, 51-87 when an all-intra one took ~18 ms - and
+    /// nothing throttled it. That was the root of three separate complaints:
+    ///
+    /// - the picture was soft, because 3 Mbit/s spread over 100 fps is 3.7 KB per frame, 0.06
+    ///   bit/pixel, and no encoder can render text at that rate;
+    /// - stripes flickered in, because VideoToolbox has to drop or crush frames to stay inside its
+    ///   byte limit, and a dropped frame breaks the reference chain the dash is still decoding;
+    /// - the wire carried 13-26 Mbit/s for a 1024x512 picture while the readout said 70 fps, which
+    ///   is more frames than the panel can show and more than the link needs to carry.
+    ///
+    /// Pacing fixes all three at once: every frame gets the bit budget the setting promised, the
+    /// encoder is never squeezed, and the dash still receives every picture it can actually show.
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
+        let frame = await serveFrame(timeout: timeout)
+        lock.lock()
+        let interval = serveInterval
+        let last = lastServeAt
+        lock.unlock()
+        // Pace even an empty answer: a dash that gets nothing retries immediately, which would
+        // spin the link at full speed through the first moments of a session.
+        if interval > 0, last > 0 {
+            let wait = interval - (ProcessInfo.processInfo.systemUptime - last)
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+        }
+        lock.lock()
+        lastServeAt = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+        return frame
+    }
+
+    /// One pull answered from the picture in hand. `nextFrame` paces the result.
+    private func serveFrame(timeout: TimeInterval) async -> EncodedFrame? {
         lock.lock()
         pulls += 1
         let prepared = fittedBuffer
@@ -1181,3 +1226,7 @@ extension CfMotoVideoSource {
         return buffer
     }
 }
+
+
+
+
