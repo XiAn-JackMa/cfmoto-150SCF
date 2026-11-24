@@ -872,8 +872,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             paddedRatio: servedCount > 0 ? Double(repeatedCount) / Double(servedCount) : 0,
             keyframeRatio: servedCount > 0 ? Double(servedKeyframes) / Double(servedCount) : 0,
             averageFrameKB: servedCount > 0 ? Double(servedBytes) / Double(servedCount) / 1024 : 0,
-            staticPadNote: lastPadNote,
             counters: countersLocked(),
+            staticPadNote: lastPadNote,
             hasPicture: servedCount > 0)
     }
 
