@@ -49,36 +49,49 @@ final class CfMotoOutput {
         source.setTestPattern(on)
         log("测试图案 \(on ? "已开启" : "已关闭")")
     }
+    /// Start the EasyConn link standalone to serve the test pattern, without a CarPlay session.
+    /// Reuses the normal start, so the listeners, probe and handshake are exactly the same; the
+    /// synthetic source fills in for CarPlay frames.
+    func startTestPattern(host: String, port: String) {
+        testPattern = true
+        start(localAddress: ReceiverConfiguration.wifiIPv4Address() ?? "", targetAddress: host, port: port)
+    }
+    /// Stop the standalone test-pattern link. The CarPlay start path calls this first so the real
+    /// session never serves a test picture.
+    func stopTestPattern() {
+        testPattern = false
+        stop()
+    }
     /// Standalone diagnostic for the settings page: probe the dash's EasyConn port without starting
     /// a session. The probe is the same `0x70000010` handshake the session uses, so "通" means a
     /// start would get past this stage. The result goes to the shared log and to the completion,
-    /// which is delivered on the main thread.
-    func testDashPort(host: String, port: UInt16, completion: @escaping (String) -> Void) {
+    /// which is delivered on the main thread as `(summary, accepted)`.
+    func testDashPort(host: String, port: UInt16, completion: @escaping (String, Bool) -> Void) {
         let client = DashProbeClient(network: POSIXNetworkProvider(), connectTimeout: 5, readTimeout: 3,
                                      track: { _ in true }, untrack: { _ in })
         Task { [weak self] in
             guard let self else { return }
             self.log("[端口测试] 探测 \(host):\(port) …")
             let outcome = await client.probeOnce(host: host, port: port, attempt: 1)
-            let summary = Self.portTestSummary(outcome, host: host, port: port)
+            let (summary, accepted) = Self.portTestSummary(outcome, host: host, port: port)
             self.log("[端口测试] \(summary)")
-            DispatchQueue.main.async { completion(summary) }
+            DispatchQueue.main.async { completion(summary, accepted) }
         }
     }
-    private static func portTestSummary(_ outcome: DashProbeClient.Outcome, host: String, port: UInt16) -> String {
+    private static func portTestSummary(_ outcome: DashProbeClient.Outcome, host: String, port: UInt16) -> (String, Bool) {
         switch outcome {
         case .accepted:
-            return "✅ 端口通 \(host):\(port)，车机已应答探测——可以开启测试图案"
+            return ("✅ 端口通 \(host):\(port)，车机已应答探测——可以开启测试图案", true)
         case .rejected(let body):
-            return "⚠️ 端口通 \(host):\(port)，但车机拒绝探测：\(body)"
+            return ("⚠️ 端口通 \(host):\(port)，但车机拒绝探测：\(body)", false)
         case .noReply:
-            return "⚠️ 端口通 \(host):\(port)，但车机未应答就关闭了连接"
+            return ("⚠️ 端口通 \(host):\(port)，但车机未应答就关闭了连接", false)
         case .unanswered:
-            return "⚠️ 端口通 \(host):\(port)，但车机 3 秒内未应答探测"
+            return ("⚠️ 端口通 \(host):\(port)，但车机 3 秒内未应答探测", false)
         case .localNetworkDenied:
-            return "⛔ \(host):\(port) 被系统拦截：本地网络权限未开，或 VPN / 省流量拦截"
+            return ("⛔ \(host):\(port) 被系统拦截：本地网络权限未开，或 VPN / 省流量拦截", false)
         case .failed(let detail):
-            return "⛔ 端口不通 \(host):\(port)：\(detail)"
+            return ("⛔ 端口不通 \(host):\(port)：\(detail)", false)
         }
     }
     private let lock = NSLock()

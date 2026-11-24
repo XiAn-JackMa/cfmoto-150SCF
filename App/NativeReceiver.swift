@@ -93,8 +93,33 @@ final class NativeReceiver {
     /// Applies the test pattern to a running link, not only to the next start.
     func setCfMotoTestPattern(_ on: Bool) { cfmoto.setTestPattern(on) }
     /// Standalone :10930 probe for the settings page (no running session needed).
-    func testCfMotoPort(host: String, port: UInt16, completion: @escaping (String) -> Void) {
+    func testCfMotoPort(host: String, port: UInt16, completion: @escaping (String, Bool) -> Void) {
         cfmoto.testDashPort(host: host, port: port, completion: completion)
+    }
+    /// Start the EasyConn link standalone to serve the test pattern (no CarPlay session).
+    func startCfMotoTestPattern(host: String, port: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.wireCfMotoCallbacks()
+            self.cfmoto.startTestPattern(host: host, port: port)
+        }
+    }
+    /// Stop the standalone test-pattern link.
+    func stopCfMotoTestPattern() {
+        queue.async { [weak self] in self?.cfmoto.stopTestPattern() }
+    }
+    /// Wire the EasyConn callbacks so the standalone test link streams the same live log/state lines
+    /// the real session does. The canvas/keyframe callbacks are no-ops while no CarPlay session is
+    /// running (their consumers guard on `running`), so wiring them here is safe and keeps one path.
+    private func wireCfMotoCallbacks() {
+        cfmoto.onLog = { [weak self] in
+            self?.onCfMotoLog?($0)
+            // Only the EasyConn view. The line is already in the store (CfMotoOutput writes
+            // it there); routing it through log() as well wrote every line twice.
+        }
+        cfmoto.onState = { [weak self] in self?.onCfMotoState?($0) }
+        cfmoto.onCanvas = { [weak self] in self?.onCfMotoCanvas?($0) }
+        cfmoto.onKeyframeRequest = { [weak self] in self?.requestKeyFrame(reason: "CFMOTO 解码恢复") }
     }
     /// Rebuild the EasyConn video pipeline after the app was in the background.
     func resynchronizeCfMotoVideo() { cfmoto.resynchronizeVideo() }
@@ -178,17 +203,7 @@ final class NativeReceiver {
                 self.tailing.start(localAddress: configuration.address, targetAddress: target, phone: phone)
             }
             if let target = configuration.cfmotoAddress {
-                self.cfmoto.onLog = { [weak self] in
-                    self?.onCfMotoLog?($0)
-                    // Only the EasyConn view. The line is already in the store (CfMotoOutput writes
-                    // it there); routing it through log() as well wrote every line twice, because
-                    // log() mirrors to that same store.
-                }
-                self.cfmoto.onState = { [weak self] in self?.onCfMotoState?($0) }
-                self.cfmoto.onCanvas = { [weak self] in self?.onCfMotoCanvas?($0) }
-                self.cfmoto.onKeyframeRequest = { [weak self] in
-                    self?.requestKeyFrame(reason: "CFMOTO 解码恢复")
-                }
+                self.wireCfMotoCallbacks()
                 self.cfmoto.setTestPattern(configuration.cfmotoTestPattern)
                 self.cfmoto.start(localAddress: ReceiverConfiguration.wifiIPv4Address() ?? configuration.address,
                                   targetAddress: target, port: configuration.cfmotoPort)

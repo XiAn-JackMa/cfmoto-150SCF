@@ -157,8 +157,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoCardStatus = UILabel()
     private let cfmotoAddressField = UITextField()
     private let cfmotoPortField = UITextField()
-    private let cfmotoTestSwitch = UISwitch()
     private var cfmotoPortTestResult: String?
+    private var cfmotoPortTestPassed = false
+    /// True while the standalone test-pattern link is running (the button is in its "stop" state).
+    private var cfmotoTestPatternActive = false
     // Manual overrides for the EasyConn video path; see CfMotoTuning for what each one does.
     private let cfmotoBitrateField = UITextField()
     private let cfmotoFPSField = UITextField()
@@ -1304,7 +1306,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             log("设置[EasyConn] " + joined([
                 ("车机IP", dashIP.isEmpty ? "自动（本机 Wi-Fi 网关）" : dashIP),
                 ("端口", port.isEmpty ? "10930" : port),
-                ("测试图案", cfmotoTestSwitch.isOn ? "开" : "关")
+                ("测试图案", cfmotoTestPatternActive ? "开" : "关")
             ]))
             log("设置[画面参数] " + joined([
                 ("码率", String(format: "%.1f Mbps", CfMotoTuning.bitrateMbps)),
@@ -1394,7 +1396,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         config.cfmotoAddress = outputMode.isEasyConn && !cfmotoAddress.isEmpty ? cfmotoAddress : nil
         let cfmotoPort = (cfmotoPortField.text ?? "").trimmingCharacters(in: .whitespaces)
         config.cfmotoPort = cfmotoPort.isEmpty ? "10930" : cfmotoPort
-        config.cfmotoTestPattern = outputMode.isEasyConn && cfmotoTestSwitch.isOn
+        config.cfmotoTestPattern = false
     }
     /// Hero text: it names the selected output, so switching modes updates the home page hint.
     private func refreshHeroHint() {
@@ -1718,8 +1720,20 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             log("无法保存身份导入结果：\(error.localizedDescription)")
         }
     }
+    /// A standalone test-pattern link owns the same PXC ports as a real start; tear it down and
+    /// disarm the switch before the CarPlay session starts.
+    private func stopCfMotoTestPatternIfNeeded() {
+        guard cfmotoTestPatternActive else { return }
+        cfmotoTestPatternActive = false
+        cfmotoPortTestPassed = false
+        cfmotoPortTestResult = nil
+        UserDefaults.standard.set(false, forKey: "cfmotoTestPattern")
+        receiver.stopCfMotoTestPattern()
+        appendCfMotoLog("已停止测试图案，准备启动 CarPlay")
+    }
     @objc private func toggleReceiver() {
         if running || waitingForNetwork { stop(); return }
+        stopCfMotoTestPatternIfNeeded()
         if !restartingAutomatically { networkRestartCount = 0 }
         clearStartupHint()
         updateCheckTask?.cancel()
@@ -2107,8 +2121,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         tailingAddressField.isEnabled = value
         cfmotoAddressField.isEnabled = value
         cfmotoPortField.isEnabled = value
-        // Live toggle: it must stay tappable while the link runs, unlike the address fields.
-        cfmotoTestSwitch.isEnabled = true
         for field in [cfmotoBitrateField, cfmotoFPSField, cfmotoCanvasWaitField, cfmotoCanvasOverrideField] {
             field.isEnabled = value
         }
@@ -2394,8 +2406,6 @@ extension ReceiverViewController {
         cfmotoAddressField.keyboardType = .decimalPad
         cfmotoAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
         cfmotoPortField.text = defaults.string(forKey: "cfmotoPort") ?? "10930"
-        cfmotoTestSwitch.isOn = defaults.bool(forKey: "cfmotoTestPattern")
-        cfmotoTestSwitch.addTarget(self, action: #selector(cfmotoTestPatternChanged), for: .valueChanged)
         cfmotoPortField.keyboardType = .numberPad
         cfmotoPortField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
         for field in [cfmotoBitrateField, cfmotoKeyframeField, cfmotoCanvasWaitField, cfmotoIDRWaitField, cfmotoStaticIdleField] {
@@ -2463,10 +2473,8 @@ extension ReceiverViewController {
         UserDefaults.standard.set(tailingAddressField.text ?? "", forKey: "tailingAddress")
         UserDefaults.standard.set(cfmotoAddressField.text ?? "", forKey: "cfmotoAddress")
         UserDefaults.standard.set(cfmotoPortField.text ?? "", forKey: "cfmotoPort")
-        UserDefaults.standard.set(cfmotoTestSwitch.isOn, forKey: "cfmotoTestPattern")
         refreshVideoOutputSummary()
     }
-    /// The pattern switch applies to a running link, so it must not wait for the next Start.
 
     /// Reads the six override fields into CfMotoTuning and applies them to a running session.
     @objc private func cfmotoTuningChanged() {
@@ -2540,10 +2548,27 @@ extension ReceiverViewController {
         reloadVisibleSettings()
     }
 
-    @objc private func cfmotoTestPatternChanged() {
-        UserDefaults.standard.set(cfmotoTestSwitch.isOn, forKey: "cfmotoTestPattern")
-        receiver.setCfMotoTestPattern(cfmotoTestSwitch.isOn)
-        appendCfMotoLog("测试图案：\(cfmotoTestSwitch.isOn ? "开" : "关")")
+    /// Button action: one tap starts the standalone test-pattern link, the next stops it. The row's
+    /// title and icon are rebuilt from `cfmotoTestPatternActive` by `reloadVisibleSettings`.
+    private func toggleCfMotoTestPattern() {
+        guard cfmotoPortTestPassed else {
+            alert("请先通过端口测试", "端口通了才能发送测试图案。")
+            return
+        }
+        if cfmotoTestPatternActive {
+            cfmotoTestPatternActive = false
+            appendCfMotoLog("测试图案：关 —— 停止测试链路")
+            receiver.stopCfMotoTestPattern()
+        } else {
+            let host = (cfmotoAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
+            let portText = (cfmotoPortField.text ?? "").trimmingCharacters(in: .whitespaces)
+            let target = host.isEmpty ? "192.168.0.1" : host
+            let port = portText.isEmpty ? "10930" : portText
+            cfmotoTestPatternActive = true
+            appendCfMotoLog("测试图案：开 —— 启动本机端口并探测 \(target):\(port)")
+            receiver.startCfMotoTestPattern(host: target, port: port)
+        }
+        reloadVisibleSettings()
     }
     /// Port test for the EasyConn settings page: probe the dash IP/port typed above, then report.
     private func testCfMotoPort() {
@@ -2552,10 +2577,12 @@ extension ReceiverViewController {
         let port = UInt16(portText) ?? 10930
         let target = host.isEmpty ? "192.168.0.1" : host
         cfmotoPortTestResult = "探测中…"
+        cfmotoPortTestPassed = false
         reloadVisibleSettings()
-        receiver.testCfMotoPort(host: target, port: port) { [weak self] summary in
+        receiver.testCfMotoPort(host: target, port: port) { [weak self] summary, passed in
             guard let self else { return }
             self.cfmotoPortTestResult = summary
+            self.cfmotoPortTestPassed = passed
             self.appendCfMotoLog(summary)
             self.reloadVisibleSettings()
         }
@@ -3256,7 +3283,11 @@ extension ReceiverViewController {
                             detail: { [weak self] in self?.cfmotoPortTestResult }) { [weak self] in
                         self?.testCfMotoPort()
                     },
-                    .control("测试图案（不接 CarPlay）", cfmotoTestSwitch)
+                    .action(cfmotoTestPatternActive ? "停止测试图案" : "启动测试图案",
+                            icon: cfmotoTestPatternActive ? ("stop.fill", .systemRed) : ("play.fill", .systemGreen),
+                            enabled: cfmotoPortTestPassed) { [weak self] in
+                        self?.toggleCfMotoTestPattern()
+                    }
                 ]),
             SettingsSection("画面参数（手动覆盖）",
                 footer: "码率默认 2.5 Mbps，是生产版 MOTO-HUB 对仪表盘的取值；CarPlay 的地图细节多，" +

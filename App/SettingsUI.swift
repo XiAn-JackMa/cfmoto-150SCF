@@ -116,6 +116,9 @@ struct SettingsRow {
     var kind: Kind
     var destructive = false
     var opensExternalLink = false
+    /// When false, the row is dimmed and non-interactive (used for the EasyConn test-pattern button,
+    /// which arms only after a successful port test).
+    var enabled = true
     var checked: (() -> Bool)?
     var onDelete: (() -> Void)?
     var subtitle: (() -> String?)?
@@ -127,8 +130,10 @@ struct SettingsRow {
         SettingsRow(title: title, icon: icon, kind: .control(control))
     }
     static func action(_ title: String, icon: (String, UIColor)? = nil, destructive: Bool = false, detail: (() -> String?)? = nil,
-                       _ run: @escaping () -> Void) -> Self {
-        SettingsRow(title: title, icon: icon, detail: detail, kind: .action(run), destructive: destructive)
+                       enabled: Bool = true, _ run: @escaping () -> Void) -> Self {
+        var row = SettingsRow(title: title, icon: icon, detail: detail, kind: .action(run), destructive: destructive)
+        row.enabled = enabled
+        return row
     }
     static func externalLink(_ title: String, icon: (String, UIColor), detail: String? = nil, _ open: @escaping () -> Void) -> Self {
         SettingsRow(title: title, icon: icon, detail: { detail }, kind: .action(open), opensExternalLink: true)
@@ -303,6 +308,12 @@ final class SettingsPageController: UITableViewController {
                 break
             }
             if let checked = row.checked { cell.accessoryType = checked() ? .checkmark : .none }
+            if !row.enabled {
+                content.textProperties.color = .tertiaryLabel
+                content.secondaryTextProperties.color = .tertiaryLabel
+                content.image = content.image?.withTintColor(.tertiaryLabel, renderingMode: .alwaysOriginal)
+                cell.selectionStyle = .none
+            }
             cell.contentConfiguration = content
         }
         cells[indexPath] = cell
@@ -314,9 +325,11 @@ final class SettingsPageController: UITableViewController {
         let row = sections[indexPath.section].rows[indexPath.row]
         switch row.kind {
         case .page(let make):
+            guard row.enabled else { return }
             view.endEditing(true)
             navigationController?.pushViewController(make(), animated: true)
         case .action(let run):
+            guard row.enabled else { return }
             view.endEditing(true)
             run()
             if row.checked != nil || row.detail != nil { reload() }
