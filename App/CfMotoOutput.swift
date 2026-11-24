@@ -228,7 +228,7 @@ final class CfMotoOutput {
             " (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))" +
             " · \(UIDevice.current.model) iOS \(UIDevice.current.systemVersion)" +
             " · 本机IP \(localAddress.isEmpty ? "-" : localAddress)")
-        log("画面参数：\(CfMotoTuning.summary)")
+        log("画面参数：\(CfMotoTuning.fullSummary)")
         onState?("正在连接春风车机…")
         log("等待车机在 10930 响应探测…")
 

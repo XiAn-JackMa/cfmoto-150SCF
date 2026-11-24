@@ -195,17 +195,15 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         guard Thread.isMainThread else { DispatchQueue.main.async { [weak self] in self?.appendCfMotoLog(line) }; return }
         cfmotoLogLines.append(line)
         if cfmotoLogLines.count > 400 { cfmotoLogLines.removeFirst(cfmotoLogLines.count - 400) }
+        let offset = cfmotoLogView.contentOffset
         cfmotoLogView.text = cfmotoLogLines.joined(separator: "\n")
-        if !cfmotoLogView.isFirstResponder {
-            cfmotoLogView.scrollRangeToVisible(NSRange(location: (cfmotoLogView.text as NSString).length, length: 0))
-        }
+        cfmotoLogView.contentOffset = offset
     }
     /// Re-reads the persistent log (after clearing, or on demand).
     private func reloadCfMotoLog() {
         let text = receiver.cfmotoLogText
         cfmotoLogLines = text.isEmpty ? [] : text.components(separatedBy: "\n")
         cfmotoLogView.text = text
-        cfmotoLogView.scrollRangeToVisible(NSRange(location: (text as NSString).length, length: 0))
     }
     /// Sends the log file through the share sheet: at the bike, one tap beats copying text.
     private func shareCfMotoLog() {
@@ -2484,6 +2482,7 @@ extension ReceiverViewController {
         func number(_ field: UITextField) -> Double? {
             Double((field.text ?? "").replacingOccurrences(of: ",", with: "."))
         }
+        let before = CfMotoTuning.fullSummary
         if let value = number(cfmotoBitrateField) { CfMotoTuning.bitrateMbps = value }
         if let value = Int(cfmotoFPSField.text ?? "") { CfMotoTuning.frameRate = value }
         if let value = number(cfmotoKeyframeField) { CfMotoTuning.keyframeSeconds = value }
@@ -2496,7 +2495,7 @@ extension ReceiverViewController {
         if let value = number(cfmotoStaticIdleField) { CfMotoTuning.staticIdleSeconds = value }
         CfMotoTuning.allIntra = cfmotoAllIntraSwitch.isOn
         syncCfMotoTuningFields()
-        appendCfMotoLog("画面参数：\(CfMotoTuning.summary)")
+        appendCfMotoLog("画面参数：手动修改：\(before) → \(CfMotoTuning.fullSummary)")
         if running, outputMode.isEasyConn { receiver.applyCfMotoTuning() }
         reloadVisibleSettings()
     }
@@ -2516,7 +2515,7 @@ extension ReceiverViewController {
         cfmotoStaticIdleField.text = String(format: "%.2f", CfMotoTuning.staticIdleSeconds)
         cfmotoAllIntraSwitch.isOn = CfMotoTuning.allIntra
         cfmotoTuningStatus.text = CfMotoTuning.isDefault
-            ? "当前为默认参数（与生产版 MOTO-HUB 对仪表盘的取值一致）"
+            ? "当前为默认参数（2.5 Mbps · 20 fps）"
             : "当前：\(CfMotoTuning.summary)"
     }
 
@@ -2534,19 +2533,10 @@ extension ReceiverViewController {
         UIApplication.shared.open(url)
     }
 
-    private func copyCfMotoLogURL() {
-        guard let text = cfmotoLogURL else {
-            appendCfMotoLog("日志服务地址未知：请先连接 Wi-Fi")
-            return
-        }
-        UIPasteboard.general.string = text
-        appendCfMotoLog("日志服务地址已复制：\(text)")
-    }
-
     @objc private func resetCfMotoTuning() {
         CfMotoTuning.reset()
         syncCfMotoTuningFields()
-        appendCfMotoLog("画面参数已恢复默认：\(CfMotoTuning.summary)")
+        appendCfMotoLog("画面参数已恢复默认：\(CfMotoTuning.fullSummary)")
         if running, outputMode.isEasyConn { receiver.applyCfMotoTuning() }
         reloadVisibleSettings()
     }
@@ -3293,22 +3283,9 @@ extension ReceiverViewController {
                     }
                 ]),
             SettingsSection("画面参数（手动覆盖）",
-                footer: "码率默认 2.5 Mbps，是生产版 MOTO-HUB 对仪表盘的取值；CarPlay 的地图细节多，" +
-                        "5 GHz 下可以试 4–6 Mbps。关键帧越短，丢帧后恢复越快，也越费流量。" +
-                        "「帧率上限」现在真的限速：车机自己没有节拍，收到一帧就立刻要下一帧，" +
-                        "不限制时会跑到 50–116 帧/秒，把码率摊薄成每帧几个 KB。所以它是清晰度的第一道开关。" +
-                        "改了立即生效：编码器重建一次，画面会闪一下。固定画布留空表示跟随车机。" +
-                        "「静止画面用轻量补帧」：画面不动时会重复同一个关键帧，" +
-                        "所以线路速率 = 帧率上限 × 关键帧大小（20 fps、8 Mbps 时约 58 KB → 约 9 Mbps）。开启后静止时改用" +
-                        "四分之一码率的小包，带宽降到约三分之一；代价是静止画面（你正在看的地图文字）会变糊。" +
-                        "只在需要省流量或降低车机解码压力时打开。" +
-                        "「缓存深度」：CarPlay 出得比车机快时允许积压几帧。调小延迟低但容易跳帧，调大更顺但延迟增加。" +
-                        "「等关键帧上限」：解码器等关键帧超过这个时间就先发缓存画面顶着，同时向 CarPlay 要一个新的。" +
-                        "「静止判定」：画面要静止多久才算真的静止（只影响轻量补帧）。" +
-                        "「强制全关键帧」：每一帧都当关键帧编码。带宽大约翻倍，但彻底消除撕裂和等关键帧卡顿——" +
-                        "画面撕裂一直存在的话，打开这一项；画面正常就别开。开启后「关键帧间隔」不再起作用。", [
+                [
                     .field("码率（Mbps）", cfmotoBitrateField, placeholder: "2.5"),
-                    .field("帧率上限（10–40）", cfmotoFPSField, placeholder: "30"),
+                    .field("帧率上限（10–40）", cfmotoFPSField, placeholder: "20"),
                     .field("关键帧间隔（秒）", cfmotoKeyframeField, placeholder: "1.0"),
                     .field("启动等待画布（秒）", cfmotoCanvasWaitField, placeholder: "4"),
                     .field("固定画布（留空跟随车机）", cfmotoCanvasOverrideField, placeholder: "1024x512"),
@@ -3321,27 +3298,29 @@ extension ReceiverViewController {
                     .note(cfmotoTuningStatus),
                     .action("恢复默认参数", icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
                         self?.resetCfMotoTuning()
-                    }
+                    },
+                    .note("码率：越大越清晰，也越费流量。"),
+                    .note("帧率：每秒张数；车机不能触摸，20 帧足够，越高越糊。"),
+                    .note("关键帧间隔：多久发一张完整图；越短丢帧恢复越快、越费流量。"),
+                    .note("等待画布：开局等车机报分辨率的最长秒数。"),
+                    .note("固定画布：留空跟随车机；填「宽x高」强制指定。"),
+                    .note("Baseline：关 = 更省码率（车机能解就关）；开 = 兼容老车机。"),
+                    .note("静止补帧：画面不动时发小图省流量，代价是静止画面变糊。"),
+                    .note("缓存深度：允许积压的帧数；大 = 顺但延迟，小 = 跟手但易跳帧。"),
+                    .note("等关键帧上限：丢关键帧后最多等几秒才用旧图顶。"),
+                    .note("静止判定：画面多久不动才算静止（只影响静止补帧）。"),
+                    .note("全关键帧：每帧都是完整图，彻底消除撕裂，带宽约翻倍。")
                 ]),
             SettingsSection("连接状态", footer: "日志同时写入 Documents/CarWithin-easyconn.log，崩溃或强退都不会丢。车边测试推荐直接「分享日志文件」，可 AirDrop / 微信 / 存到「文件」。", [
                 .view(cfmotoLogView),
                 .action("浏览器打开实时日志", icon: ("safari", .systemBlue), detail: { [weak self] in self?.cfmotoLogURL }) { [weak self] in
                     self?.openCfMotoLogPage()
                 },
-                .action("复制日志地址", icon: ("link", .systemTeal), detail: { [weak self] in self?.cfmotoLogURL }) { [weak self] in
-                    self?.copyCfMotoLogURL()
-                },
                 .action("分享日志文件", icon: ("square.and.arrow.up", .systemBlue)) { [weak self] in
                     self?.shareCfMotoLog()
                 },
                 .action("复制日志", icon: ("doc.on.doc", .systemBlue)) { [weak self] in
                     UIPasteboard.general.string = self?.receiver.cfmotoLogText
-                },
-                .action("复制诊断摘要", icon: ("doc.text.magnifyingglass", .systemTeal)) { [weak self] in
-                    UIPasteboard.general.string = self?.receiver.cfmotoDiagnostics ?? "EasyConn 未运行"
-                },
-                .action("刷新", icon: ("arrow.clockwise", .systemGray)) { [weak self] in
-                    self?.reloadCfMotoLog()
                 },
                 .action("清空日志", icon: ("trash", .systemGray), destructive: true) { [weak self] in
                     self?.receiver.clearCfMotoLog()

@@ -4,8 +4,9 @@ import Foundation
 
 /// Manual overrides for the EasyConn video path, persisted in UserDefaults.
 ///
-/// The defaults are what the production MOTO-HUB Android app uses for a TFT dash - 2.5 Mbit/s,
-/// 30 fps, a keyframe every second - and they are what the 150SCF runs well on. The overrides
+/// The defaults start from what the production MOTO-HUB Android app uses for a TFT dash - 2.5 Mbit/s,
+/// a keyframe every second - but cap the frame rate at 20 fps, because the dash is display-only and
+/// 30 fps just thins out each frame. The overrides
 /// exist for the cases those defaults do not cover:
 ///
 /// - a 2:1 dash showing a busy CarPlay map wants more bitrate than a self-drawn dashboard does,
@@ -36,7 +37,7 @@ enum CfMotoTuning {
     /// one arrived, so the serve rate was set by our reply latency (51-116 pulls/s measured) and
     /// this value only told the encoder what to expect.
     static var frameRate: Int {
-        get { Int(clamp(Double(int(for: .frameRate, fallback: 30)), 10, 40)) }
+        get { Int(clamp(Double(int(for: .frameRate, fallback: 20)), 10, 40)) }
         set { defaults.set(Int(clamp(Double(newValue), 10, 40)), forKey: Key.frameRate) }
     }
 
@@ -51,7 +52,7 @@ enum CfMotoTuning {
 
     // MARK: Profile
 
-    /// Baseline@3.1 keeps old dash decoders happy. Turning it off lets VideoToolbox pick a higher
+    /// Baseline@3.1 keeps old dash decoders happy at the cost of ~10% compression efficiency.
     // MARK: Static picture
 
     /// Answer an idle pull with a smaller keyframe instead of the full-quality one.
@@ -77,9 +78,9 @@ enum CfMotoTuning {
 
     static var staticPadMbps: Double { Double(staticPadBitrate) / 1_000_000 }
 
-    /// level, which is only worth trying when a dash refuses the stream.
+    /// Off by default: the 150SCF decodes the higher profiles, so VideoToolbox picks the leaner one.
     static var forceBaseline: Bool {
-        get { defaults.object(forKey: Key.baseline) as? Bool ?? true }
+        get { defaults.object(forKey: Key.baseline) as? Bool ?? false }
         set { defaults.set(newValue, forKey: Key.baseline) }
     }
 
@@ -113,7 +114,7 @@ enum CfMotoTuning {
 
     // MARK: Housekeeping
 
-    /// One line for the log and the settings screen.
+    /// Short one-liner for the settings status line.
     static var summary: String {
         let extras = canvasOverrideSize.map { " · 固定画布 \($0.width)×\($0.height)" } ?? ""
         let pad = staticPadEnabled ? String(format: " · 静止补帧 %.1f Mbps", staticPadMbps) : ""
@@ -122,6 +123,16 @@ enum CfMotoTuning {
                       bitrateMbps, frameRate, keyframeSeconds,
                       forceBaseline ? "Baseline 3.1" : "自动 profile",
                       canvasWaitSeconds) + extras + pad + intra
+    }
+
+    /// Every option on one line, for the log.
+    static var fullSummary: String {
+        let canvas = canvasOverrideSize.map { "\($0.width)×\($0.height)" } ?? "跟随车机"
+        let pad = staticPadEnabled ? String(format: "开（%.1f Mbps）", staticPadMbps) : "关"
+        return String(format: "码率 %.1f Mbps · 帧率 %d · 关键帧 %.1f 秒 · 等待画布 %.0f 秒 · 固定画布 %@ · Baseline %@ · 静止补帧 %@ · 缓存 %d 帧 · 等关键帧 %.1f 秒 · 静止判定 %.2f 秒 · 全关键帧 %@",
+                      bitrateMbps, frameRate, keyframeSeconds, canvasWaitSeconds, canvas,
+                      forceBaseline ? "开" : "关", pad, bufferDepth, idrWaitSeconds, staticIdleSeconds,
+                      allIntra ? "开" : "关")
     }
 
     static func reset() {

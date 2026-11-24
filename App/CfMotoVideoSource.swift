@@ -297,7 +297,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         lock.unlock()
         old?.invalidate()
         stalePadForTuning?.invalidate()
-        log?("CFMOTO 画面参数已应用：\(CfMotoTuning.summary)（编码器已重建）")
+        log?("CFMOTO 画面参数已应用：\(CfMotoTuning.fullSummary)（编码器已重建）")
     }
 
     init(queueCapacity: Int = 3) {

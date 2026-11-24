@@ -167,6 +167,11 @@ struct SettingsRow {
         label.font = .preferredFont(forTextStyle: .footnote); label.textColor = .secondaryLabel; label.numberOfLines = 0
         return .view(label)
     }
+    /// Secondary text from a plain string, one row per call.
+    static func note(_ text: String) -> Self {
+        let label = UILabel(); label.text = text
+        return note(label)
+    }
 }
 
 struct SettingsSection {
