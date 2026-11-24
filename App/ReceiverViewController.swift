@@ -173,6 +173,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoIDRWaitField = UITextField()
     private let cfmotoStaticIdleField = UITextField()
     private let cfmotoStaticPadMinSavingField = UITextField()
+    private let cfmotoStaticPadMaxField = UITextField()
+    private let cfmotoStaticPadQualityField = UITextField()
     private let cfmotoAllIntraSwitch = UISwitch()
     private let handlebarDoubleWindowField = UITextField()
     private let cfmotoTuningStatus = UILabel()
@@ -1228,7 +1230,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             String(format: "车机 %@ · %.1f fps · %.1f Mbps", s.canvasSize, s.servedFPS, s.bitrateMbps)
         ]
         if CfMotoTuning.staticPadEnabled {
-            infoLines.append(s.staticPadNote.isEmpty ? "静止补帧：等待静止…" : "静止补帧：\(s.staticPadNote)")
+            let reuse = s.padReuses > 0 ? " · 已复用 \(s.padReuses) 次" : ""
+            infoLines.append(s.staticPadNote.isEmpty
+                ? "静止补帧：等待静止…"
+                : "静止补帧：\(s.staticPadNote)\(reuse)")
         }
         infoLines.append("CarPlay \(s.carPlaySize) · \(s.scaleText == "1:1" ? "不缩放" : "缩放 \(s.scaleText)")")
         let repeatedKeyframe = Int(s.paddedRatio * 100)
@@ -2139,6 +2144,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         cfmotoIDRWaitField.isEnabled = value
         cfmotoStaticIdleField.isEnabled = value
         cfmotoStaticPadMinSavingField.isEnabled = value
+        cfmotoStaticPadMaxField.isEnabled = value
+        cfmotoStaticPadQualityField.isEnabled = value
         cfmotoAllIntraSwitch.isEnabled = value
         carLifeAddressField.isEnabled = value
     }
@@ -2429,6 +2436,10 @@ extension ReceiverViewController {
         cfmotoStaticPadMinSavingField.borderStyle = .none; cfmotoStaticPadMinSavingField.textAlignment = .right
         cfmotoStaticPadMinSavingField.keyboardType = .numberPad
         cfmotoStaticPadMinSavingField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
+        for field in [cfmotoStaticPadMaxField, cfmotoStaticPadQualityField] {
+            field.borderStyle = .none; field.textAlignment = .right; field.keyboardType = .decimalPad
+            field.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
+        }
         cfmotoCanvasOverrideField.addTarget(self, action: #selector(cfmotoTuningChanged), for: .editingDidEnd)
         cfmotoBaselineSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         cfmotoStaticPadSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
@@ -2506,6 +2517,8 @@ extension ReceiverViewController {
         if let value = number(cfmotoIDRWaitField) { CfMotoTuning.idrWaitSeconds = value }
         if let value = number(cfmotoStaticIdleField) { CfMotoTuning.staticIdleSeconds = value }
         if let value = Int(cfmotoStaticPadMinSavingField.text ?? "") { CfMotoTuning.staticPadMinSavingPct = value }
+        if let value = number(cfmotoStaticPadMaxField) { CfMotoTuning.staticPadMaxMbps = value }
+        if let value = number(cfmotoStaticPadQualityField) { CfMotoTuning.staticPadQuality = value }
         CfMotoTuning.allIntra = cfmotoAllIntraSwitch.isOn
         syncCfMotoTuningFields()
         appendCfMotoLog("画面参数：手动修改：\(before) → \(CfMotoTuning.fullSummary)")
@@ -2527,6 +2540,8 @@ extension ReceiverViewController {
         cfmotoIDRWaitField.text = String(format: "%.1f", CfMotoTuning.idrWaitSeconds)
         cfmotoStaticIdleField.text = String(format: "%.2f", CfMotoTuning.staticIdleSeconds)
         cfmotoStaticPadMinSavingField.text = "\(CfMotoTuning.staticPadMinSavingPct)"
+        cfmotoStaticPadMaxField.text = String(format: "%.1f", CfMotoTuning.staticPadMaxMbps)
+        cfmotoStaticPadQualityField.text = String(format: "%.2f", CfMotoTuning.staticPadQuality)
         cfmotoAllIntraSwitch.isOn = CfMotoTuning.allIntra
         cfmotoTuningStatus.text = CfMotoTuning.isDefault
             ? "当前为默认参数（2.5 Mbps · 20 fps）"
@@ -3309,6 +3324,8 @@ extension ReceiverViewController {
                     .field("等关键帧上限（秒）", cfmotoIDRWaitField, placeholder: "2.0"),
                     .field("静止判定（秒）", cfmotoStaticIdleField, placeholder: "0.35"),
                     .field("补帧最小节省（%）", cfmotoStaticPadMinSavingField, placeholder: "30"),
+                    .field("补帧码率上限（Mbps）", cfmotoStaticPadMaxField, placeholder: "0.8"),
+                    .field("补帧画质（0.05–0.5）", cfmotoStaticPadQualityField, placeholder: "0.15"),
                     .control("强制全关键帧", cfmotoAllIntraSwitch),
                     .note(cfmotoTuningStatus),
                     .action("恢复默认参数", icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
@@ -3325,6 +3342,8 @@ extension ReceiverViewController {
                     .note("等关键帧上限：丢关键帧后最多等几秒才用旧图顶。"),
                     .note("静止判定：画面多久不动才算静止（只影响静止补帧）。"),
                     .note("补帧最小节省：轻量包须比正常关键帧小多少（%）才用它；0 = 只要更小就用。"),
+                    .note("补帧码率上限：补帧码率最高到多少；调高静止更清晰，但轻量包更大、可能过不了上面的节省门槛。"),
+                    .note("补帧画质：补帧编码质量，越大越清晰、包越大（与上限/门槛互相制约）。"),
                     .note("全关键帧：每帧都是完整图，彻底消除撕裂，带宽约翻倍。")
                 ]),
             SettingsSection("连接状态", footer: "日志同时写入 Documents/CarWithin-easyconn.log，崩溃或强退都不会丢。车边测试推荐直接「分享日志文件」，可 AirDrop / 微信 / 存到「文件」。", [

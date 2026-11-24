@@ -39,6 +39,8 @@ struct CfMotoLiveStats {
     var counters = ""
     /// Latest static-pad outcome, shown under the bitrate when the pad is enabled.
     var staticPadNote = ""
+    /// Times the current pad has been sent since it was generated; 0 means no pad in use.
+    var padReuses = 0
     /// False until a picture has actually been served, which is what separates "CarPlay has
     /// nothing new to show" from "CarPlay never started".
     var hasPicture = false
@@ -189,6 +191,8 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var staticPadOn = false
     /// Latest static-pad outcome, for the line under the bitrate readout.
     private var lastPadNote = ""
+    /// How many times the current pad has been served since it was generated.
+    private var padReuses = 0
     /// Cached copies of the pull-path tuning values, read once when the tuning is applied instead
     /// of on every pull.
     private var bufferDepth = 6
@@ -413,7 +417,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                     profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .mainAuto,
                     // Bias quantisation directly: a lone keyframe after idle would otherwise ignore
                     // the bitrate target entirely.
-                    quality: 0.15,
+                    quality: CfMotoTuning.staticPadQuality,
                     keyframeSeconds: encoderSettings.keyframeIntervalSeconds
                 ) { [weak self] outcome in
                     guard let self else { return }
@@ -462,6 +466,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             padKeyframeAU = useful ? frame.data : nil
             padGeneration = generation
             if !useful { padRejectedGeneration = generation }
+            padReuses = 0
             padCount += 1
             lock.unlock()
             guard useful else {
@@ -658,7 +663,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
            let pad = staticPadAccessUnit(prepared, canvas: canvas) {
             // The still picture, re-compressed small: same content, a fraction of the bytes.
             lock.lock()
-            servedCount += 1; repeatedCount += 1
+            servedCount += 1; repeatedCount += 1; padReuses += 1
             noteServed(pad.count, keyframe: true)
             sequence &+= 1
             let seq = sequence
@@ -877,6 +882,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             averageFrameKB: servedCount > 0 ? Double(servedBytes) / Double(servedCount) / 1024 : 0,
             counters: countersLocked(),
             staticPadNote: lastPadNote,
+            padReuses: padReuses,
             hasPicture: servedCount > 0)
     }
 
