@@ -49,6 +49,38 @@ final class CfMotoOutput {
         source.setTestPattern(on)
         log("测试图案 \(on ? "已开启" : "已关闭")")
     }
+    /// Standalone diagnostic for the settings page: probe the dash's EasyConn port without starting
+    /// a session. The probe is the same `0x70000010` handshake the session uses, so "通" means a
+    /// start would get past this stage. The result goes to the shared log and to the completion,
+    /// which is delivered on the main thread.
+    func testDashPort(host: String, port: UInt16, completion: @escaping (String) -> Void) {
+        let client = DashProbeClient(network: POSIXNetworkProvider(), connectTimeout: 5, readTimeout: 3,
+                                     track: { _ in true }, untrack: { _ in })
+        Task { [weak self] in
+            guard let self else { return }
+            self.log("[端口测试] 探测 \(host):\(port) …")
+            let outcome = await client.probeOnce(host: host, port: port, attempt: 1)
+            let summary = Self.portTestSummary(outcome, host: host, port: port)
+            self.log("[端口测试] \(summary)")
+            DispatchQueue.main.async { completion(summary) }
+        }
+    }
+    private static func portTestSummary(_ outcome: DashProbeClient.Outcome, host: String, port: UInt16) -> String {
+        switch outcome {
+        case .accepted:
+            return "✅ 端口通 \(host):\(port)，车机已应答探测——可以开启测试图案"
+        case .rejected(let body):
+            return "⚠️ 端口通 \(host):\(port)，但车机拒绝探测：\(body)"
+        case .noReply:
+            return "⚠️ 端口通 \(host):\(port)，但车机未应答就关闭了连接"
+        case .unanswered:
+            return "⚠️ 端口通 \(host):\(port)，但车机 3 秒内未应答探测"
+        case .localNetworkDenied:
+            return "⛔ \(host):\(port) 被系统拦截：本地网络权限未开，或 VPN / 省流量拦截"
+        case .failed(let detail):
+            return "⛔ 端口不通 \(host):\(port)：\(detail)"
+        }
+    }
     private let lock = NSLock()
     private var link: EasyConnLink?
     private var pump: Task<Void, Never>?

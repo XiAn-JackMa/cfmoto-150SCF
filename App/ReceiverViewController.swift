@@ -158,6 +158,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoAddressField = UITextField()
     private let cfmotoPortField = UITextField()
     private let cfmotoTestSwitch = UISwitch()
+    private var cfmotoPortTestResult: String?
     // Manual overrides for the EasyConn video path; see CfMotoTuning for what each one does.
     private let cfmotoBitrateField = UITextField()
     private let cfmotoFPSField = UITextField()
@@ -2544,6 +2545,21 @@ extension ReceiverViewController {
         receiver.setCfMotoTestPattern(cfmotoTestSwitch.isOn)
         appendCfMotoLog("测试图案：\(cfmotoTestSwitch.isOn ? "开" : "关")")
     }
+    /// Port test for the EasyConn settings page: probe the dash IP/port typed above, then report.
+    private func testCfMotoPort() {
+        let host = (cfmotoAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
+        let portText = (cfmotoPortField.text ?? "").trimmingCharacters(in: .whitespaces)
+        let port = UInt16(portText) ?? 10930
+        let target = host.isEmpty ? "192.168.0.1" : host
+        cfmotoPortTestResult = "探测中…"
+        reloadVisibleSettings()
+        receiver.testCfMotoPort(host: target, port: port) { [weak self] summary in
+            guard let self else { return }
+            self.cfmotoPortTestResult = summary
+            self.appendCfMotoLog(summary)
+            self.reloadVisibleSettings()
+        }
+    }
 
     @objc private func headUnitOutputChanged() {
         saveHeadUnitOutput()
@@ -3236,6 +3252,10 @@ extension ReceiverViewController {
                         "声音走 iPhone 或蓝牙，触控暂不支持。", [
                     .field("车机 IP 地址", cfmotoAddressField, placeholder: "192.168.0.1"),
                     .field("EasyConn 端口", cfmotoPortField, placeholder: "10930"),
+                    .action("端口测试（探测车机）", icon: ("antenna.radiowaves.left.and.right", .systemGreen),
+                            detail: { [weak self] in self?.cfmotoPortTestResult }) { [weak self] in
+                        self?.testCfMotoPort()
+                    },
                     .control("测试图案（不接 CarPlay）", cfmotoTestSwitch)
                 ]),
             SettingsSection("画面参数（手动覆盖）",

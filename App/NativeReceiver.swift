@@ -92,6 +92,10 @@ final class NativeReceiver {
     var negotiatedCfMotoCanvas: VideoCanvas? { cfmoto.negotiatedCanvas }
     /// Applies the test pattern to a running link, not only to the next start.
     func setCfMotoTestPattern(_ on: Bool) { cfmoto.setTestPattern(on) }
+    /// Standalone :10930 probe for the settings page (no running session needed).
+    func testCfMotoPort(host: String, port: UInt16, completion: @escaping (String) -> Void) {
+        cfmoto.testDashPort(host: host, port: port, completion: completion)
+    }
     /// Rebuild the EasyConn video pipeline after the app was in the background.
     func resynchronizeCfMotoVideo() { cfmoto.resynchronizeVideo() }
     /// Bitrate / profile overrides changed on the settings page.
