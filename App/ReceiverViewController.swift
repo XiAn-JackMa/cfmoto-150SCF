@@ -3690,6 +3690,13 @@ extension ReceiverViewController {
         version.font = .preferredFont(forTextStyle: .subheadline)
         version.textColor = .secondaryLabel
         version.adjustsFontForContentSizeCategory = true
+        let credit = UILabel()
+        credit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发。目前仅在 150SCF 实测通过，理论上支持 150SC / 150AUR；功能尚不完善，仅供测试使用。—— 150SCF 小马"
+        credit.font = .preferredFont(forTextStyle: .caption1)
+        credit.textColor = .tertiaryLabel
+        credit.textAlignment = .center
+        credit.numberOfLines = 0
+        credit.adjustsFontForContentSizeCategory = true
         let introduction = UILabel()
         introduction.text = "在 iPhone 上启动 CarPlay，通过浏览器或兼容的 CarLife 车机查看和操控。"
         introduction.font = .preferredFont(forTextStyle: .subheadline)
@@ -3698,12 +3705,13 @@ extension ReceiverViewController {
         introduction.textAlignment = .center
         introduction.numberOfLines = 0
 
-        let card = UIStackView(arrangedSubviews: [icon, name, version, introduction])
+        let card = UIStackView(arrangedSubviews: [icon, name, version, credit, introduction])
         card.axis = .vertical
         card.alignment = .center
         card.spacing = 4
         card.setCustomSpacing(12, after: icon)
-        card.setCustomSpacing(12, after: version)
+        card.setCustomSpacing(8, after: version)
+        card.setCustomSpacing(8, after: credit)
         card.isLayoutMarginsRelativeArrangement = true
         card.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 16, leading: 8, bottom: 16, trailing: 8)
         return card
