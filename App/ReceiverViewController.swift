@@ -427,6 +427,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         heroIcon.heightAnchor.constraint(equalToConstant: 48).isActive = true
         let titleStack = UIStackView(arrangedSubviews: [heroIcon, heading])
         titleStack.axis = .horizontal; titleStack.alignment = .center; titleStack.spacing = 14
+        let homeCredit = UILabel()
+        homeCredit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发。目前仅在 150SCF 实测通过，理论上支持 150SC / 150AUR；功能尚不完善，仅供测试使用。—— 150SCF 小马"
+        homeCredit.font = .preferredFont(forTextStyle: .caption1)
+        homeCredit.textColor = .tertiaryLabel
+        homeCredit.textAlignment = .center
+        homeCredit.numberOfLines = 0
+        homeCredit.adjustsFontForContentSizeCategory = true
         let statusIcon = UIImageView(image: UIImage(systemName: "circle.fill"))
         statusIcon.tintColor = .systemBlue
         statusIcon.contentMode = .scaleAspectFit
@@ -443,7 +450,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         startupHint.numberOfLines = 0
         startupHint.adjustsFontForContentSizeCategory = true
         startupHint.isHidden = true
-        let heroStack = UIStackView(arrangedSubviews: [titleStack, explanation, statusRow, startupHint, connectionHelp, receiverPicker, networkSummary])
+        let heroStack = UIStackView(arrangedSubviews: [titleStack, homeCredit, explanation, statusRow, startupHint, connectionHelp, receiverPicker, networkSummary])
         heroStack.axis = .vertical; heroStack.spacing = 14
         heroStack.isLayoutMarginsRelativeArrangement = true
         heroStack.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 22, leading: 20, bottom: 22, trailing: 20)

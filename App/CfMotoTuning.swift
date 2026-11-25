@@ -23,7 +23,8 @@ enum CfMotoTuning {
 
     /// 0.6 ... 12 Mbit/s.
     static var bitrateMbps: Double {
-        get { clamp(double(for: .bitrate, fallback: 6.0), 0.6, 12) }
+        // 本分支写死 6 Mbps，忽略本地存档（旧配置无法覆盖）。
+        get { 6.0 }
         set { defaults.set(clamp(newValue, 0.6, 12), forKey: Key.bitrate) }
     }
 
@@ -37,7 +38,8 @@ enum CfMotoTuning {
     /// one arrived, so the serve rate was set by our reply latency (51-116 pulls/s measured) and
     /// this value only told the encoder what to expect.
     static var frameRate: Int {
-        get { Int(clamp(Double(int(for: .frameRate, fallback: 30)), 10, 40)) }
+        // 本分支写死 30 fps，忽略本地存档。
+        get { 30 }
         set { defaults.set(Int(clamp(Double(newValue), 10, 40)), forKey: Key.frameRate) }
     }
 
@@ -63,7 +65,8 @@ enum CfMotoTuning {
     /// a quarter of the bitrate makes the repeat six times cheaper, at the cost of a softer still
     /// image - which is exactly the picture a rider reads, so it is off by default.
     static var staticPadEnabled: Bool {
-        get { defaults.object(forKey: Key.staticPad) as? Bool ?? false }
+        // 本分支写死关闭补帧，忽略本地存档。
+        get { false }
         set { defaults.set(newValue, forKey: Key.staticPad) }
     }
 
@@ -105,8 +108,9 @@ enum CfMotoTuning {
     }
 
     /// On by default: Baseline 3.1 (what the official CFMOTO app emits) for compatibility.
+    /// 本分支写死开启，忽略本地存档。
     static var forceBaseline: Bool {
-        get { defaults.object(forKey: Key.baseline) as? Bool ?? true }
+        get { true }
         set { defaults.set(newValue, forKey: Key.baseline) }
     }
 
@@ -208,7 +212,8 @@ enum CfMotoTuning {
     /// reference a picture the dash lost, and no pull ever waits for a keyframe. What it costs is
     /// bandwidth, which is why it is off by default.
     static var allIntra: Bool {
-        get { defaults.object(forKey: Key.allIntra) as? Bool ?? false }
+        // 本分支写死关闭全关键帧，忽略本地存档。
+        get { false }
         set { defaults.set(newValue, forKey: Key.allIntra) }
     }
 
