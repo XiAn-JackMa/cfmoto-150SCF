@@ -429,8 +429,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         titleStack.axis = .horizontal; titleStack.alignment = .center; titleStack.spacing = 14
         let homeCredit = UILabel()
         homeCredit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发。目前仅在 150SCF 实测通过，理论上支持 150SC / 150AUR；功能尚不完善，仅供测试使用。—— 150SCF 小马"
-        homeCredit.font = .preferredFont(forTextStyle: .caption1)
-        homeCredit.textColor = .tertiaryLabel
+        homeCredit.font = .preferredFont(forTextStyle: .subheadline)
+        homeCredit.textColor = .label
         homeCredit.textAlignment = .center
         homeCredit.numberOfLines = 0
         homeCredit.adjustsFontForContentSizeCategory = true
