@@ -3311,41 +3311,7 @@ extension ReceiverViewController {
                         self?.toggleCfMotoTestPattern()
                     }
                 ]),
-            SettingsSection("画面参数（手动覆盖）",
-                [
-                    .field("码率（Mbps）", cfmotoBitrateField, placeholder: "2.5"),
-                    .field("帧率上限（10–40）", cfmotoFPSField, placeholder: "20"),
-                    .field("关键帧间隔（秒）", cfmotoKeyframeField, placeholder: "1.0"),
-                    .field("启动等待画布（秒）", cfmotoCanvasWaitField, placeholder: "4"),
-                    .field("固定画布（留空跟随车机）", cfmotoCanvasOverrideField, placeholder: "1024x512"),
-                    .control("强制 Baseline 3.1", cfmotoBaselineSwitch),
-                    .control("静止画面用轻量补帧", cfmotoStaticPadSwitch),
-                    .field("缓存深度（帧）", cfmotoBufferDepthField, placeholder: "6"),
-                    .field("等关键帧上限（秒）", cfmotoIDRWaitField, placeholder: "2.0"),
-                    .field("静止判定（秒）", cfmotoStaticIdleField, placeholder: "0.35"),
-                    .field("补帧最小节省（%）", cfmotoStaticPadMinSavingField, placeholder: "30"),
-                    .field("补帧码率上限（Mbps）", cfmotoStaticPadMaxField, placeholder: "0.8"),
-                    .field("补帧画质（0.05–0.5）", cfmotoStaticPadQualityField, placeholder: "0.15"),
-                    .control("强制全关键帧", cfmotoAllIntraSwitch),
-                    .note(cfmotoTuningStatus),
-                    .action("恢复默认参数", icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
-                        self?.resetCfMotoTuning()
-                    },
-                    .note("码率：越大越清晰，也越费流量。"),
-                    .note("帧率：每秒张数；车机不能触摸，20 帧足够，越高越糊。"),
-                    .note("关键帧间隔：多久发一张完整图；越短丢帧恢复越快、越费流量。"),
-                    .note("等待画布：开局等车机报分辨率的最长秒数。"),
-                    .note("固定画布：留空跟随车机；填「宽x高」强制指定。"),
-                    .note("Baseline：关 = Main profile（更省码率）；开 = Baseline 3.1（兼容性最好）。"),
-                    .note("静止补帧：画面不动时发小图省流量，代价是静止画面变糊。"),
-                    .note("缓存深度：允许积压的帧数；大 = 顺但延迟，小 = 跟手但易跳帧。"),
-                    .note("等关键帧上限：丢关键帧后最多等几秒才用旧图顶。"),
-                    .note("静止判定：画面多久不动才算静止（只影响静止补帧）。"),
-                    .note("补帧最小节省：轻量包须比正常关键帧小多少（%）才用它；0 = 只要更小就用。"),
-                    .note("补帧码率上限：补帧码率最高到多少；调高静止更清晰，但轻量包更大、可能过不了上面的节省门槛。"),
-                    .note("补帧画质：补帧编码质量，越大越清晰、包越大（与上限/门槛互相制约）。"),
-                    .note("全关键帧：每帧都是完整图，彻底消除撕裂，带宽约翻倍。")
-                ]),
+            // 「画面参数（手动覆盖）」已隐藏：本分支固定 6 Mbps / 30 fps / Baseline 3.1，静止降节奏关闭。
             SettingsSection("连接状态", footer: "日志同时写入 Documents/CarWithin-easyconn.log，崩溃或强退都不会丢。车边测试推荐直接「分享日志文件」，可 AirDrop / 微信 / 存到「文件」。", [
                 .view(cfmotoLogView),
                 .action("浏览器打开实时日志", icon: ("safari", .systemBlue), detail: { [weak self] in self?.cfmotoLogURL }) { [weak self] in

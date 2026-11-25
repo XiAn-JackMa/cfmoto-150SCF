@@ -23,7 +23,7 @@ enum CfMotoTuning {
 
     /// 0.6 ... 12 Mbit/s.
     static var bitrateMbps: Double {
-        get { clamp(double(for: .bitrate, fallback: 2.5), 0.6, 12) }
+        get { clamp(double(for: .bitrate, fallback: 6.0), 0.6, 12) }
         set { defaults.set(clamp(newValue, 0.6, 12), forKey: Key.bitrate) }
     }
 
@@ -37,7 +37,7 @@ enum CfMotoTuning {
     /// one arrived, so the serve rate was set by our reply latency (51-116 pulls/s measured) and
     /// this value only told the encoder what to expect.
     static var frameRate: Int {
-        get { Int(clamp(Double(int(for: .frameRate, fallback: 20)), 10, 40)) }
+        get { Int(clamp(Double(int(for: .frameRate, fallback: 30)), 10, 40)) }
         set { defaults.set(Int(clamp(Double(newValue), 10, 40)), forKey: Key.frameRate) }
     }
 
@@ -104,9 +104,9 @@ enum CfMotoTuning {
         set { defaults.set(Int(clamp(Double(newValue), 0, 60)), forKey: Key.staticPadMinSaving) }
     }
 
-    /// Off by default: Main profile (auto level) for leaner compression; on pins Baseline 3.1.
+    /// On by default: Baseline 3.1 (what the official CFMOTO app emits) for compatibility.
     static var forceBaseline: Bool {
-        get { defaults.object(forKey: Key.baseline) as? Bool ?? false }
+        get { defaults.object(forKey: Key.baseline) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.baseline) }
     }
 

@@ -204,10 +204,6 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// The dash keeps no cadence of its own, so without this the serve rate is whatever our reply
     /// latency allows (measured 51-116 pulls/s on a real 150SCF).
     private var serveInterval: TimeInterval = 0.05
-    /// Idle pacing: once the picture has been unchanged for `staticIdleSeconds`, serve at most
-    /// this rate. 5 fps is plenty for a static screen and cuts the idle bitrate fourfold, which
-    /// the static pad alone cannot guarantee for detailed content.
-    private let staticPaceInterval: TimeInterval = 1.0 / 5.0
     /// Uptime of the last frame handed to the dash; the pacing above measures from here.
     private var lastServeAt: TimeInterval = 0
 
@@ -617,17 +613,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
         let frame = await serveFrame(timeout: timeout)
         lock.lock()
-        let normal = serveInterval
-        let idle = lastPictureUptime > 0 ? ProcessInfo.processInfo.systemUptime - lastPictureUptime : 0
-        let staticIdle = staticIdleSeconds
+        let interval = serveInterval
         let last = lastServeAt
         lock.unlock()
         // Pace even an empty answer: a dash that gets nothing retries immediately, which would
         // spin the link at full speed through the first moments of a session.
-        // 静止降节奏：画面空闲超过静止判定时长后，把节奏降到 staticPaceInterval（默认 5 fps），
-        // 码率按比例下降；画面一动，下一次送帧立刻回到正常节奏。
-        let interval = idle >= staticIdle ? max(normal, staticPaceInterval) : normal
-        if last > 0 {
+        if interval > 0, last > 0 {
             let wait = interval - (ProcessInfo.processInfo.systemUptime - last)
             if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
         }
