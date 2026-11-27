@@ -17,7 +17,7 @@
 // 本类只补三件 1.0.83 里由 App 层负责的事：
 //   1. 把日志暴露成 10950 网页（手机/电脑浏览器随时可看，不必等投屏）；
 //   2. 端口测试 / 测试图案的开关落到 1.0.83 的 `testDashPort` / `startTestPattern`；
-//   3. 保持 1.0.6 的调用签名（`start(...)` 那串参数），避免改 `NativeReceiver` 的逻辑。
+//   3. 给 `NativeReceiver` 提供 `start(...)` 入口；不再保留 1.0.6 的 `phone` / `maxBitrate` / `maxFps` 死参数。
 
 import Dispatch
 import Foundation
@@ -62,11 +62,9 @@ final class CfMotoEasyConnOutput {
 
     // MARK: - 生命周期
 
-    /// - Note: `maxBitrate` / `maxFps` / `phone` 是 1.0.6 那套「按 profile 上限取参数」的入参。
-    ///   1.0.83 的 EasyConn 由车机在 REQ_RV_DATA_START 里给画布和帧率，码率走 `CfMotoTuning`，
-    ///   所以这里不再用它们；保留参数只为不改 `NativeReceiver` 的调用点。
-    func start(localAddress: String, targetAddress: String, phone: TailingPhoneInfo,
-               maxBitrate: Int, maxFps: Int,
+    /// 只接 EasyConn 自己需要的参数（本机地址、车机地址）。码率/帧率由车机协商 + `CfMotoTuning` 决定，
+    /// 手机身份由引擎内部写死（`PhoneIdentity`），不再沿用 1.0.6 的 `phone` / `maxBitrate` / `maxFps`。
+    func start(localAddress: String, targetAddress: String,
                onState: @escaping (String) -> Void, onLog: @escaping (String) -> Void,
                onKeyframeRequest: @escaping () -> Void, onGiveUp: (() -> Void)? = nil) {
         self.onState = onState

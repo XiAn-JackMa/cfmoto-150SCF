@@ -163,8 +163,7 @@ final class NativeReceiver {
                     model: "iPhone", systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                     width: configuration.width, height: configuration.height, rotation: 1)
                 if configuration.cfmotoTuned {
-                    self.cfmotoEasyConn.start(localAddress: configuration.address, targetAddress: target, phone: phone,
-                                              maxBitrate: profile.bitrate, maxFps: profile.fps,
+                    self.cfmotoEasyConn.start(localAddress: configuration.address, targetAddress: target,
                                               onState: { [weak self] in self?.onCfmotoState?($0) },
                                               onLog: { [weak self] in self?.onEasyConnLog?($0) },
                                               onKeyframeRequest: { [weak self] in self?.requestKeyFrame(reason: "春风 EasyConn 解码恢复") },

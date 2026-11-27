@@ -1053,9 +1053,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 // CarPlay 源帧率固定 30 FPS：EasyConn 自己的值，不复用 6.2 寸 profile 的 sourceFPS。
                 // 编码给车机的帧率另走 CfMotoTuning.frameRate（默认 20），与这里无关。
                 let carPlaySourceFPS = 30
-                // 默认 16 对齐画布（1024×515 → 1024×512），不是编码尺寸（1024×516），
-                // 否则 iPhone 每帧都要把 516 重采样成 512，文字发软、竖向有缝。
-                var width = cfmoto.width & ~15, height = cfmoto.height & ~15
+                // EasyConn 默认画布写死 1024×512（150SCF 已知画布），不复用 6.2 寸 profile 的尺寸。
+                var width = 1024, height = 512
                 // 固定画布优先：车手指定，车机无权改。
                 if let pinned = CfMotoTuning.canvasOverrideSize {
                     return DisplayPlan(width: pinned.width, height: pinned.height,
@@ -2971,8 +2970,14 @@ extension ReceiverViewController {
             }
             if let cfmoto = cfmotoProfile {
                 let name = outputMode.title
+                let detail: String
+                if outputMode == .cfmotoEasyConn {
+                    detail = "1024×512 · H.264 · EasyConn · \(CfMotoTuning.frameRate) FPS（可调）"
+                } else {
+                    detail = "\(cfmoto.width)×\(cfmoto.height) · H.264 · PXC(TCP) · \(cfmoto.fps) FPS"
+                }
                 return [
-                    SettingsSection(name, [.info(CWL("仪表画面"), "\(cfmoto.width)×\(cfmoto.height) · H.264 · PXC(TCP) · \(cfmoto.fps) FPS")]),
+                    SettingsSection(name, [.info(CWL("仪表画面"), detail)]),
                     SettingsSection(CWL("图标"), [.control(CWL("CarPlay 图标大小"), icon: ("square.grid.2x2.fill", .systemPurple), iconSizeControl)])
                 ]
             }
