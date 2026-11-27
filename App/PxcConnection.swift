@@ -65,8 +65,10 @@ final class PxcConnection: @unchecked Sendable {
     init(localIP: String, targetIP: String, phone: TailingPhoneInfo, dashboard: String,
          identityProvider: @escaping () throws -> TailingIdentity = TailingIdentity.load,
          discoversEasyConn: Bool = false,
+         probePort: UInt16 = Port.probe,
          log: @escaping (String) -> Void) {
         self.discoversEasyConn = discoversEasyConn
+        self.probePort = probePort
         self.localIP = localIP
         self.targetIP = targetIP
         self.phone = phone

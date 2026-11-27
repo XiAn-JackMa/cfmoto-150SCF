@@ -2227,10 +2227,12 @@ extension ReceiverViewController {
     /// settings pages; the rest of this controller reads them directly.
     fileprivate func configureSettingsControls() {
         let brands: [(String, [HeadUnitOutput])] = [
+            // 春风 EasyConn 单独占一级（用户要求从「春风」分组里提出来）。
+            (CWL("春风 EasyConn"), [.cfmotoEasyConn]),
             (CWL("九号"), [.ninebot43, .ninebot, .ninebotSeven]),
             (CWL("台铃"), [.tailing]),
             (CWL("极核"), [.zeeho, .zeehoSEPlus, .zeehoAE2, .zeehoAE4i]),
-            (CWL("春风"), [.cfmoto5, .cfmoto62, .cfmotoEasyConn, .cfmoto700MT, .cfmoto800MT, .cfmoto675SRR]),
+            (CWL("春风"), [.cfmoto5, .cfmoto62, .cfmoto700MT, .cfmoto800MT, .cfmoto675SRR]),
             (CWL("首驱"), [.shouqu]),
             (CWL("贝纳利"), [.benelliTRK]), (CWL("无极"), [.vogeDS800X]),
             (CWL("升仕"), [.zontes368E, .zontes368G, .zontes703RR]),
@@ -3110,22 +3112,14 @@ extension ReceiverViewController {
                     .note(cfmotoStatus)
                 ])]
             case .cfmotoEasyConn:
-                // 面板拿到输出实例与仪表 IP，才能在设置页里做端口测试、改参数、看日志。
+                // 面板自带连接、端口测试、测试图案、内联日志与画面参数（版式照 1.0.83）。
                 easyConnPanel.output = receiver.easyConnOutput
-                easyConnPanel.addressProvider = { [weak self] in
-                    (self?.cfmotoAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                }
+                easyConnPanel.addressField = cfmotoAddressField
+                easyConnPanel.presenter = { [weak self] in self?.settingsNavigation?.topViewController }
                 easyConnPanel.onChange = { [weak self] in
                     (self?.settingsNavigation?.topViewController as? SettingsPageController)?.reload()
                 }
-                var sections: [SettingsSection] = [
-                    SettingsSection(headUnitOutput.selectedTitle, footer: CWL("EasyConn 走 6.2 寸的仪表规格（1024×515）。画面参数、端口测试、测试图案与日志都在下面，只影响这一项。"), [
-                        .field(CWL("仪表 IP 地址"), cfmotoAddressField, placeholder: "留空尝试 .1"),
-                        .note(cfmotoStatus)
-                    ])
-                ]
-                sections.append(contentsOf: easyConnPanel.sections())
-                return sections
+                return easyConnPanel.sections()
             case .ninebot, .ninebotSeven, .ninebot43:
                 let fiveInch = outputMode == .ninebot
                 let startup = ninebotInstructions

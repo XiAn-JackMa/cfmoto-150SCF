@@ -1,141 +1,205 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// 春风 EasyConn 的输出设置面板 + 日志页。
+// 春风 EasyConn 的输出设置：连接、端口测试、测试图案、日志（内联，不做二级页）、
+// 画面参数（手动覆盖）与逐条说明。
+//
+// 版式照 1.0.83 的 `cfmotoOutputSections()`（提交 17b1c48 那一版：隐藏画质之前），
+// 文案逐条搬过来，只把宿主从 `ReceiverViewController` 换成这个独立文件。
 //
 // 只在「春风 EasyConn」这一项下面出现；春风 5 寸 / 6.2 寸 仍然走上游原来的
 // `CfmotoOutput`，看不到这些控件，行为也不变。
-//
-// 所有数值都写进 `CfMotoTuning`（越界会被它自己夹到合法区间），写完后调用
-// `output.reloadTuning()` 重建编码器，并在日志里留下一行新参数作为凭证。
 
 import UIKit
+
+extension SettingsRow {
+    /// 1.0.6 只有 `.note(UILabel)`；补一个字符串版本，省掉每行都包一个 UILabel。
+    static func note(_ text: String) -> Self {
+        let label = UILabel()
+        label.text = text
+        return .note(label)
+    }
+}
 
 final class CfMotoEasyConnPanel {
     /// 只弱引用：面板的生命周期跟着设置页，输出跟着接收器。
     weak var output: CfMotoEasyConnOutput?
-    /// 仪表 IP 由设置页提供（那里本来就有输入框）。
-    var addressProvider: () -> String = { "" }
+    /// 仪表 IP 输入框由设置页提供（那里本来就有）。
+    var addressField: UITextField?
     /// 需要整页刷新时调用（探测结果、参数落盘后）。
     var onChange: (() -> Void)?
+    /// 分享日志文件时的宿主。
+    var presenter: () -> UIViewController? = { nil }
+
+    private let portField: UITextField = {
+        let field = UITextField()
+        field.keyboardType = .numberPad
+        field.textAlignment = .right
+        field.placeholder = "10930"
+        field.returnKeyType = .done
+        return field
+    }()
 
     private let bitrateField = CfMotoEasyConnPanel.numberField("2.5", decimal: true)
     private let fpsField = CfMotoEasyConnPanel.numberField("20", decimal: false)
     private let keyframeField = CfMotoEasyConnPanel.numberField("1.0", decimal: true)
+    private let canvasWaitField = CfMotoEasyConnPanel.numberField("4", decimal: false)
     private let canvasField = CfMotoEasyConnPanel.plainField("1024x512")
     private let baselineSwitch = UISwitch()
     private let staticPadSwitch = UISwitch()
+    private let bufferDepthField = CfMotoEasyConnPanel.numberField("6", decimal: false)
+    private let idrWaitField = CfMotoEasyConnPanel.numberField("2.0", decimal: true)
     private let staticIdleField = CfMotoEasyConnPanel.numberField("0.35", decimal: true)
+    private let staticPadSavingField = CfMotoEasyConnPanel.numberField("30", decimal: false)
     private let staticPadMaxField = CfMotoEasyConnPanel.numberField("0.8", decimal: true)
     private let staticPadQualityField = CfMotoEasyConnPanel.numberField("0.15", decimal: true)
-    private let staticPadSavingField = CfMotoEasyConnPanel.numberField("30", decimal: false)
-    private let testPatternSwitch = UISwitch()
+    private let allIntraSwitch = UISwitch()
+
+    /// 日志直显在这里（不做二级页面）。
+    private let logView: UITextView = {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        view.textColor = .label
+        view.backgroundColor = .secondarySystemBackground
+        view.layer.cornerRadius = 10
+        view.clipsToBounds = true
+        view.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        view.heightAnchor.constraint(equalToConstant: 220).isActive = true
+        return view
+    }()
 
     private var probeText = CWL("未测试")
     private var probePassed = false
+    private var logTimer: Timer?
 
     init() {
-        for field in [bitrateField, fpsField, keyframeField, canvasField,
-                      staticIdleField, staticPadMaxField, staticPadQualityField, staticPadSavingField] {
+        for field in [bitrateField, fpsField, keyframeField, canvasWaitField, canvasField,
+                      bufferDepthField, idrWaitField, staticIdleField, staticPadSavingField,
+                      staticPadMaxField, staticPadQualityField] {
             field.addTarget(self, action: #selector(commitTuning), for: .editingDidEnd)
             field.addTarget(self, action: #selector(commitTuning), for: .editingDidEndOnExit)
         }
-        baselineSwitch.addTarget(self, action: #selector(commitTuning), for: .valueChanged)
-        staticPadSwitch.addTarget(self, action: #selector(commitTuning), for: .valueChanged)
-        testPatternSwitch.addTarget(self, action: #selector(toggleTestPattern), for: .valueChanged)
+        portField.addTarget(self, action: #selector(commitPort), for: .editingDidEnd)
+        portField.addTarget(self, action: #selector(commitPort), for: .editingDidEndOnExit)
+        for toggle in [baselineSwitch, staticPadSwitch, allIntraSwitch] {
+            toggle.addTarget(self, action: #selector(commitTuning), for: .valueChanged)
+        }
     }
 
     // MARK: - 页面内容
 
     func sections() -> [SettingsSection] {
         refreshFields()
-        let sections: [SettingsSection] = [
-            SettingsSection(CWL("编码参数"),
-                            footer: CWL("默认 2.5 Mbit/s · 20 FPS（与 1.0.83 一致）。改完立刻生效，日志里会留一行新参数。"),
-                            [
-                                .field(CWL("码率上限（Mbit/s）"), bitrateField, placeholder: "2.5"),
-                                .field(CWL("帧率上限（FPS）"), fpsField, placeholder: "20"),
-                                .field(CWL("关键帧间隔（秒）"), keyframeField, placeholder: "1.0"),
-                                .field(CWL("固定画布（可留空）"), canvasField, placeholder: "1024x512"),
-                                .control(CWL("强制 Baseline"), baselineSwitch),
-                            ]),
-            SettingsSection(CWL("静态补位"),
-                            footer: CWL("画面静止时改用轻量的关键帧顶上，省流量；代价是静止画面会稍微粗一点。"),
-                            [
-                                .control(CWL("开启静态补位"), staticPadSwitch),
-                                .field(CWL("静止判定（秒）"), staticIdleField, placeholder: "0.35"),
-                                .field(CWL("轻量码率上限（Mbit/s）"), staticPadMaxField, placeholder: "0.8"),
-                                .field(CWL("质量偏置"), staticPadQualityField, placeholder: "0.15"),
-                                .field(CWL("最小节省（%）"), staticPadSavingField, placeholder: "30"),
-                            ]),
-            SettingsSection(CWL("诊断"),
-                            footer: CWL("端口测试只检查「能不能连上仪表 10930」，不发协议字节；测试图案用来确认「链路通、画面不对」时问题在编码这一侧。"),
-                            [
-                                .action(CWL("端口测试（仪表 10930）"),
-                                        icon: ("antenna.radiowaves.left.and.right", .systemGreen),
-                                        detail: { [weak self] in self?.probeText }) { [weak self] in self?.runProbe() },
-                                .control(CWL("测试图案（彩条）"), testPatternSwitch),
-                                .info(CWL("当前画面"), output?.liveStats.summary ?? CWL("输出未启动")),
-                                .info(CWL("静态补位"), staticPadNote),
-                            ]),
-            SettingsSection(footer: CWL("只影响春风 EasyConn；春风 5 寸 / 6.2 寸 不受影响。"),
-                            [
-                                .action(CWL("恢复默认画面参数"), icon: ("arrow.counterclockwise", .systemRed), destructive: true) { [weak self] in
-                                    self?.restoreDefaults()
-                                },
-                                .page(CWL("日志"), icon: ("doc.text.fill", .systemGray)) { [weak self] in
-                                    self?.makeLogPage() ?? UIViewController()
-                                },
-                            ]),
+        refreshLogView()
+        startLogTimer()
+        return [
+            SettingsSection("春风 EasyConn（MotoPlay）",
+                footer: "iPhone 先加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面后再启动 CarPlay。"
+                      + "地址留空表示使用本机当前 Wi-Fi 网关。CarPlay 会按车机要求的画布 1:1 渲染（150SCF 为 1024×512），"
+                      + "所以上面「画面 › 尺寸/分辨率/宽高比」在本模式下不生效，也不会有黑边。"
+                      + "声音走 iPhone 或蓝牙，触控暂不支持。",
+                [
+                    addressRow,
+                    .field(CWL("EasyConn 端口"), portField, placeholder: "10930"),
+                    .action(CWL("端口测试（探测车机）"), icon: ("antenna.radiowaves.left.and.right", .systemGreen),
+                            detail: { [weak self] in self?.probeText }) { [weak self] in
+                        self?.runProbe()
+                    },
+                    .action(testPatternTitle, icon: testPatternIcon, detail: { [weak self] in self?.testPatternDetail }) { [weak self] in
+                        self?.toggleTestPattern()
+                    },
+                    .view(logView),
+                    .action(CWL("浏览器打开实时日志"), icon: ("safari", .systemBlue),
+                            detail: { [weak self] in self?.logURLText }) { [weak self] in
+                        self?.openLogPage()
+                    },
+                    .action(CWL("分享日志文件"), icon: ("square.and.arrow.up", .systemBlue)) { [weak self] in
+                        self?.shareLog()
+                    },
+                    .action(CWL("复制日志"), icon: ("doc.on.doc", .systemBlue)) { [weak self] in
+                        UIPasteboard.general.string = self?.output?.logDump ?? ""
+                    },
+                    .action(CWL("清空日志"), icon: ("trash", .systemGray), destructive: true) { [weak self] in
+                        self?.output?.store.clear()
+                        self?.refreshLogView()
+                    },
+                ]),
+            SettingsSection(CWL("画面参数（手动覆盖）"),
+                [
+                    .field(CWL("码率（Mbps）"), bitrateField, placeholder: "2.5"),
+                    .field(CWL("帧率上限（10–40）"), fpsField, placeholder: "20"),
+                    .field(CWL("关键帧间隔（秒）"), keyframeField, placeholder: "1.0"),
+                    .field(CWL("启动等待画布（秒）"), canvasWaitField, placeholder: "4"),
+                    .field(CWL("固定画布（留空跟随车机）"), canvasField, placeholder: "1024x512"),
+                    .control(CWL("强制 Baseline 3.1"), baselineSwitch),
+                    .control(CWL("静止画面用轻量补帧"), staticPadSwitch),
+                    .field(CWL("缓存深度（帧）"), bufferDepthField, placeholder: "6"),
+                    .field(CWL("等关键帧上限（秒）"), idrWaitField, placeholder: "2.0"),
+                    .field(CWL("静止判定（秒）"), staticIdleField, placeholder: "0.35"),
+                    .field(CWL("补帧最小节省（%）"), staticPadSavingField, placeholder: "30"),
+                    .field(CWL("补帧码率上限（Mbps）"), staticPadMaxField, placeholder: "0.8"),
+                    .field(CWL("补帧画质（0.05–0.5）"), staticPadQualityField, placeholder: "0.15"),
+                    .control(CWL("强制全关键帧"), allIntraSwitch),
+                    .note("当前：" + CfMotoTuning.summary),
+                    .action(CWL("恢复默认参数"), icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
+                        self?.restoreDefaults()
+                    },
+                    .note(CWL("码率：越大越清晰，也越费流量。")),
+                    .note(CWL("帧率：每秒张数；车机不能触摸，20 帧足够，越高越糊。")),
+                    .note(CWL("关键帧间隔：多久发一张完整图；越短丢帧恢复越快、越费流量。")),
+                    .note(CWL("等待画布：开局等车机报分辨率的最长秒数。")),
+                    .note(CWL("固定画布：留空跟随车机；填「宽x高」强制指定。")),
+                    .note(CWL("Baseline：关 = Main profile（更省码率）；开 = Baseline 3.1（兼容性最好）。")),
+                    .note(CWL("静止补帧：画面不动时发小图省流量，代价是静止画面变糊。")),
+                    .note(CWL("缓存深度：允许积压的帧数；大 = 顺但延迟，小 = 跟手但易跳帧。")),
+                    .note(CWL("等关键帧上限：丢关键帧后最多等几秒才用旧图顶。")),
+                    .note(CWL("静止判定：画面多久不动才算静止（只影响静止补帧）。")),
+                    .note(CWL("补帧最小节省：轻量包须比正常关键帧小多少（%）才用它；0 = 只要更小就用。")),
+                    .note(CWL("补帧码率上限：补帧码率最高到多少；调高静止更清晰，但轻量包更大、可能过不了上面的节省门槛。")),
+                    .note(CWL("补帧画质：补帧编码质量，越大越清晰、包越大（与上限/门槛互相制约）。")),
+                    .note(CWL("全关键帧：每帧都是完整图，彻底消除撕裂，带宽约翻倍。")),
+                ]),
         ]
-        return sections
     }
 
-    private var staticPadNote: String {
-        guard let output, output.liveStats.staticPadNote.isEmpty == false else {
-            return CfMotoTuning.staticPadEnabled ? CWL("已开启，等待静止画面") : CWL("未开启")
-        }
-        return output.liveStats.staticPadNote
+    private var addressRow: SettingsRow {
+        guard let addressField else { return .note(CWL("缺少仪表 IP 输入框")) }
+        return .field(CWL("车机 IP 地址"), addressField, placeholder: "192.168.0.1")
     }
 
-    // MARK: - 写参数
+    private var testPatternTitle: String {
+        output?.testPatternEnabled == true ? CWL("停止测试图案") : CWL("启动测试图案")
+    }
 
-    @objc private func commitTuning() {
-        if let value = number(bitrateField) { CfMotoTuning.bitrateMbps = value }
-        if let value = Int((fpsField.text ?? "").trimmingCharacters(in: .whitespaces)) { CfMotoTuning.frameRate = value }
-        if let value = number(keyframeField) { CfMotoTuning.keyframeSeconds = value }
-        CfMotoTuning.canvasOverride = canvasField.text
-        CfMotoTuning.forceBaseline = baselineSwitch.isOn
-        CfMotoTuning.staticPadEnabled = staticPadSwitch.isOn
-        if let value = number(staticIdleField) { CfMotoTuning.staticIdleSeconds = value }
-        if let value = number(staticPadMaxField) { CfMotoTuning.staticPadMaxMbps = value }
-        if let value = number(staticPadQualityField) { CfMotoTuning.staticPadQuality = value }
-        if let value = Int((staticPadSavingField.text ?? "").trimmingCharacters(in: .whitespaces)) {
-            CfMotoTuning.staticPadMinSavingPct = value
-        }
-        output?.reloadTuning()
+    private var testPatternIcon: (String, UIColor) {
+        output?.testPatternEnabled == true ? ("stop.fill", .systemRed) : ("play.fill", .systemGreen)
+    }
+
+    private var testPatternDetail: String? {
+        probePassed ? nil : CWL("先通过端口测试")
+    }
+
+    private var logURLText: String {
+        output?.logURL ?? CWL("未连接 Wi-Fi")
+    }
+
+    // MARK: - 端口 / 测试图案
+
+    @objc private func commitPort() {
+        let raw = (portField.text ?? "").trimmingCharacters(in: .whitespaces)
+        let value = UInt16(raw) ?? 10930
+        CfMotoEasyConnOutput.probePort = value == 0 ? 10930 : value
         refreshFields()
         onChange?()
     }
 
-    @objc private func restoreDefaults() {
-        CfMotoTuning.reset()
-        baselineSwitch.isOn = CfMotoTuning.forceBaseline
-        staticPadSwitch.isOn = CfMotoTuning.staticPadEnabled
-        refreshFields()
-        output?.reloadTuning()
-        onChange?()
-    }
-
-    @objc private func toggleTestPattern() {
-        output?.setTestPattern(testPatternSwitch.isOn)
-        onChange?()
-    }
-
-    @objc private func runProbe() {
-        let host = addressProvider()
+    private func runProbe() {
+        output?.ensureLogServer()
         probeText = CWL("探测中…")
         onChange?()
-        output?.probe(host: host) { [weak self] message, ok in
+        let host = (addressField?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        output?.probe(host: host, port: CfMotoEasyConnOutput.probePort) { [weak self] message, ok in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.probeText = message
@@ -145,20 +209,109 @@ final class CfMotoEasyConnPanel {
         }
     }
 
+    private func toggleTestPattern() {
+        guard probePassed || output?.testPatternEnabled == true else {
+            probeText = CWL("先点「端口测试」，通过了才能开测试图案")
+            onChange?()
+            return
+        }
+        let next = output?.testPatternEnabled != true
+        output?.setTestPattern(next)
+        onChange?()
+    }
+
+    // MARK: - 日志
+
+    private func startLogTimer() {
+        output?.ensureLogServer()
+        guard logTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard self.logView.window != nil else {
+                self.logTimer?.invalidate()
+                self.logTimer = nil
+                return
+            }
+            self.refreshLogView()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        logTimer = timer
+    }
+
+    private func refreshLogView() {
+        let body = output?.logDump ?? ""
+        guard logView.text != body else { return }
+        let offset = logView.contentOffset
+        logView.text = body
+        logView.contentOffset = offset
+    }
+
+    private func openLogPage() {
+        guard let url = output?.logURLValue else {
+            probeText = CWL("先连上 Wi-Fi，或在本机直接用浏览器打开 127.0.0.1:\(CfMotoLogServer.defaultPort)")
+            onChange?()
+            return
+        }
+        UIApplication.shared.open(url)
+    }
+
+    private func shareLog() {
+        guard let file = output?.store.fileForSharing(), let host = presenter() else { return }
+        let sheet = UIActivityViewController(activityItems: [file], applicationActivities: nil)
+        sheet.popoverPresentationController?.sourceView = logView
+        sheet.popoverPresentationController?.sourceRect = logView.bounds
+        host.present(sheet, animated: true)
+    }
+
+    // MARK: - 写参数
+
+    @objc private func commitTuning() {
+        if let value = number(bitrateField) { CfMotoTuning.bitrateMbps = value }
+        if let value = Int((fpsField.text ?? "").trimmingCharacters(in: .whitespaces)) { CfMotoTuning.frameRate = value }
+        if let value = number(keyframeField) { CfMotoTuning.keyframeSeconds = value }
+        if let value = number(canvasWaitField) { CfMotoTuning.canvasWaitSeconds = value }
+        CfMotoTuning.canvasOverride = canvasField.text
+        CfMotoTuning.forceBaseline = baselineSwitch.isOn
+        CfMotoTuning.staticPadEnabled = staticPadSwitch.isOn
+        if let value = Int((bufferDepthField.text ?? "").trimmingCharacters(in: .whitespaces)) { CfMotoTuning.bufferDepth = value }
+        if let value = number(idrWaitField) { CfMotoTuning.idrWaitSeconds = value }
+        if let value = number(staticIdleField) { CfMotoTuning.staticIdleSeconds = value }
+        if let value = Int((staticPadSavingField.text ?? "").trimmingCharacters(in: .whitespaces)) {
+            CfMotoTuning.staticPadMinSavingPct = value
+        }
+        if let value = number(staticPadMaxField) { CfMotoTuning.staticPadMaxMbps = value }
+        if let value = number(staticPadQualityField) { CfMotoTuning.staticPadQuality = value }
+        CfMotoTuning.allIntra = allIntraSwitch.isOn
+        output?.reloadTuning()
+        refreshFields()
+        onChange?()
+    }
+
+    private func restoreDefaults() {
+        CfMotoTuning.reset()
+        refreshFields()
+        output?.reloadTuning()
+        onChange?()
+    }
+
     // MARK: - 字段填充
 
     private func refreshFields() {
         bitrateField.text = trimmed(CfMotoTuning.bitrateMbps, digits: 1)
         fpsField.text = "\(CfMotoTuning.frameRate)"
         keyframeField.text = trimmed(CfMotoTuning.keyframeSeconds, digits: 1)
+        canvasWaitField.text = trimmed(CfMotoTuning.canvasWaitSeconds, digits: 0)
         canvasField.text = CfMotoTuning.canvasOverride ?? ""
         baselineSwitch.isOn = CfMotoTuning.forceBaseline
         staticPadSwitch.isOn = CfMotoTuning.staticPadEnabled
+        bufferDepthField.text = "\(CfMotoTuning.bufferDepth)"
+        idrWaitField.text = trimmed(CfMotoTuning.idrWaitSeconds, digits: 1)
         staticIdleField.text = trimmed(CfMotoTuning.staticIdleSeconds, digits: 2)
+        staticPadSavingField.text = "\(CfMotoTuning.staticPadMinSavingPct)"
         staticPadMaxField.text = trimmed(CfMotoTuning.staticPadMaxMbps, digits: 2)
         staticPadQualityField.text = trimmed(CfMotoTuning.staticPadQuality, digits: 2)
-        staticPadSavingField.text = "\(CfMotoTuning.staticPadMinSavingPct)"
-        if let output { testPatternSwitch.isOn = output.testPatternEnabled }
+        allIntraSwitch.isOn = CfMotoTuning.allIntra
+        portField.text = "\(CfMotoEasyConnOutput.probePort)"
     }
 
     private func trimmed(_ value: Double, digits: Int) -> String {
@@ -171,55 +324,6 @@ final class CfMotoEasyConnPanel {
     private func number(_ field: UITextField) -> Double? {
         let raw = (field.text ?? "").replacingOccurrences(of: ",", with: ".")
         return Double(raw.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    // MARK: - 日志页
-
-    func makeLogPage() -> SettingsPageController {
-        let text = UITextView()
-        text.isEditable = false
-        text.isSelectable = true
-        text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        text.textColor = .label
-        text.backgroundColor = .secondarySystemBackground
-        text.layer.cornerRadius = 10
-        text.clipsToBounds = true
-        text.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
-        text.heightAnchor.constraint(equalToConstant: 380).isActive = true
-
-        let controller = SettingsPageController(title: CWL("日志")) { [weak self] in
-            guard let self else { return [] }
-            var sections: [SettingsSection] = [
-                SettingsSection(footer: CWL("最近 400 条，不含 Wi-Fi 密码与 MFi 私钥。"), [.view(text)]),
-                SettingsSection([
-                    .action(CWL("复制日志"), icon: ("doc.on.doc.fill", .systemBlue)) { [weak self] in
-                        UIPasteboard.general.string = self?.output?.logDump ?? ""
-                    },
-                    .action(CWL("清空日志"), icon: ("trash.fill", .systemRed), destructive: true) { [weak self] in
-                        self?.output?.store.clear()
-                        text.text = ""
-                    },
-                ]),
-            ]
-            if let address = ReceiverConfiguration.wifiIPv4Address() {
-                let url = "http://\(address):\(CfMotoLogServer.defaultPort)/"
-                sections.append(SettingsSection(footer: CWL("同一 Wi-Fi 下的电脑用浏览器打开这个地址，可以实时看日志。"), [
-                    .info(CWL("日志网址"), url),
-                    .action(CWL("复制网址"), icon: ("link", .systemTeal)) {
-                        UIPasteboard.general.string = url
-                    },
-                ]))
-            }
-            return sections
-        }
-        controller.onAppear = { [weak self] in
-            let body = self?.output?.logDump ?? ""
-            text.text = body
-            if !body.isEmpty {
-                text.scrollRangeToVisible(NSRange(location: body.utf16.count - 1, length: 1))
-            }
-        }
-        return controller
     }
 
     // MARK: - 控件工厂

@@ -17,6 +17,15 @@ import Foundation
 import Network
 
 final class CfMotoEasyConnOutput {
+    /// 仪表探测端口（默认 10930）。用户可以在设置页改，写进 UserDefaults。
+    static var probePort: UInt16 {
+        get {
+            let value = UserDefaults.standard.integer(forKey: "cfmotoEasyConnPort")
+            return value > 0 && value < 65536 ? UInt16(value) : 10930
+        }
+        set { UserDefaults.standard.set(Int(newValue), forKey: "cfmotoEasyConnPort") }
+    }
+
     /// 视频源的日志与回调都从它自己的队列/任务里出来，这里统一收进日志环。
     private let queue: DispatchQueue
 
@@ -74,7 +83,7 @@ final class CfMotoEasyConnOutput {
         lock.unlock()
         source.restart()
         source.reloadTuning()
-        startLogServer()
+        ensureLogServer()
         let thread = Thread { [weak self] in self?.run() }
         thread.name = "cfmoto-easyconn"
         thread.qualityOfService = .userInitiated
@@ -90,7 +99,7 @@ final class CfMotoEasyConnOutput {
         lock.unlock()
         closeLink()
         source.shutdown()
-        logServer.stop()
+        // 日志服务故意不停：设置页随时能看日志，不必等下一次投屏。
     }
 
     private var active: Bool {
@@ -185,6 +194,7 @@ final class CfMotoEasyConnOutput {
             }
             let conn = PxcConnection(localIP: localAddress, targetIP: target, phone: phone,
                                      dashboard: "春风 EasyConn", discoversEasyConn: true,
+                                     probePort: Self.probePort,
                                      log: { [weak self] in self?.log($0) })
             guard install(conn) else { return }
             do {
@@ -333,6 +343,34 @@ final class CfMotoEasyConnOutput {
         }
     }
 
+    private var logServerStarted = false
+
+    /// 日志网页随时可访问：打开设置页就起，不必等 CarPlay 启动。
+    /// （之前只在 `start()` 里起服务，用户没投屏时打开网址会连不上。）
+    func ensureLogServer() {
+        lock.lock()
+        let already = logServerStarted
+        logServerStarted = true
+        lock.unlock()
+        guard !already else { return }
+        logServer.text = { [weak self] in self?.store.text ?? "" }
+        logServer.page = { [weak self] index in
+            self?.store.lines(from: index) ?? (index, [])
+        }
+        logServer.onLog = { [weak self] line in self?.store.append(line) }
+        logServer.start()
+    }
+
+    /// 面板上显示的实时日志地址。
+    var logURL: String {
+        guard let address = ReceiverConfiguration.wifiIPv4Address() else { return "未连接 Wi-Fi" }
+        return "http://\(address):\(CfMotoLogServer.defaultPort)/"
+    }
+
+    var logURLValue: URL? {
+        URL(string: logURL)
+    }
+
     // MARK: - 日志
 
     private func log(_ line: String) {
@@ -342,15 +380,6 @@ final class CfMotoEasyConnOutput {
 
     private func report(_ state: String) {
         onState?(state)
-    }
-
-    private func startLogServer() {
-        logServer.text = { [weak self] in self?.store.text ?? "" }
-        logServer.page = { [weak self] index in
-            self?.store.lines(from: index) ?? (index, [])
-        }
-        logServer.onLog = { [weak self] line in self?.store.append(line) }
-        logServer.start()
     }
 
     /// 只在第一次探测结果上回调，避免「超时」与「稍后失败」重复弹提示。
