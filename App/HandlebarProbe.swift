@@ -108,7 +108,7 @@ final class HandlebarProbe: @unchecked Sendable {
         guard !isRunning else { return }
         isRunning = true
         lock.lock()
-        screenLocked = !UIApplication.shared.protectedDataIsAvailable
+        screenLocked = !UIApplication.shared.isProtectedDataAvailable
         lock.unlock()
         observeLockState()
         startVolumeObservation()
