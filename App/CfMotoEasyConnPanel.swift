@@ -240,7 +240,8 @@ final class CfMotoEasyConnPanel {
     }
 
     private func refreshLogView() {
-        let body = output?.logDump ?? ""
+        // 1.0.83 的面板日志就是日志环原文（`store.text`），不带诊断表头，方便和车边截图对照。
+        let body = output?.store.text ?? ""
         guard logView.text != body else { return }
         let offset = logView.contentOffset
         logView.text = body
@@ -249,6 +250,8 @@ final class CfMotoEasyConnPanel {
 
     private func openLogPage() {
         guard let url = output?.logURLValue else {
+            // 1.0.83 把这一句也写进 EasyConn 日志，车边排查时能看到当时为什么打不开。
+            output?.log(CWL("日志服务地址未知：请先连接 Wi-Fi"))
             probeText = CWL("先连上 Wi-Fi，或在本机直接用浏览器打开 127.0.0.1:\(CfMotoLogServer.defaultPort)")
             onChange?()
             return

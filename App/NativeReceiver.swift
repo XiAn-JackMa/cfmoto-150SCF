@@ -70,6 +70,10 @@ final class NativeReceiver {
     /// 只有选中「春风 EasyConn」时才会启动，5 寸 / 6.2 寸 完全不经过它。
     private let cfmotoEasyConn = CfMotoEasyConnOutput(name: "cfmoto-easyconn")
     var easyConnOutput: CfMotoEasyConnOutput { cfmotoEasyConn }
+
+    /// App 侧的日志（CarPlay 状态、端口、错误…）也写进 EasyConn 的日志环：
+    /// 否则一次根本没出画面的会话在导出的日志里毫无痕迹（1.0.83 的 `appendCfMotoLogText`）。
+    func appendEasyConnLog(_ line: String) { cfmotoEasyConn.store.append(line) }
     var onCfmotoState: ((String) -> Void)?
     private let tailing = TailingOutput()
     var onTailingState: ((String) -> Void)?
@@ -85,6 +89,9 @@ final class NativeReceiver {
     // NetService must be published/stopped on a thread with a run loop (main).
     private var discoveryService: NetService?
     var onLog: ((String) -> Void)?
+    /// 春风 EasyConn 的引擎行：日志环里已经有一份（`CfMotoLogStore` 自己写的），
+    /// 这里只用于刷新屏幕上的日志，避免再镜像一次（1.0.83 的 `onCfMotoLog` 同理）。
+    var onEasyConnLog: ((String) -> Void)?
     var onListening: ((UInt16) -> Void)?
     var onControlConnected: (() -> Void)?
     var onVideo: ((Data, VideoCodec) -> Void)?
@@ -159,7 +166,7 @@ final class NativeReceiver {
                     self.cfmotoEasyConn.start(localAddress: configuration.address, targetAddress: target, phone: phone,
                                               maxBitrate: profile.bitrate, maxFps: profile.fps,
                                               onState: { [weak self] in self?.onCfmotoState?($0) },
-                                              onLog: { [weak self] in self?.log($0) },
+                                              onLog: { [weak self] in self?.onEasyConnLog?($0) },
                                               onKeyframeRequest: { [weak self] in self?.requestKeyFrame(reason: "春风 EasyConn 解码恢复") },
                                               onGiveUp: { [weak self] in
                                                   self?.queue.async { [weak self] in self?.fail("春风仪表持续连接失败超过 3 分钟，已停止 CarPlay") }

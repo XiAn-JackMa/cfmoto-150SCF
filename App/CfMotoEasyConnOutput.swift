@@ -68,7 +68,10 @@ final class CfMotoEasyConnOutput {
         self.onKeyframeRequest = onKeyframeRequest
         self.onGiveUp = onGiveUp
         // 真正的 CarPlay 会话开始前先关掉测试图案，避免把彩条推给车机（1.0.83 同样如此）。
-        engine.stopTestPattern()
+        if engine.testPattern {
+            engine.stopTestPattern()
+            log("已停止测试图案，准备启动 CarPlay")
+        }
         ensureLogServer()
         log("链路引擎：OpenCfMotoCore EasyConnLink（1.0.83）· 探测 10930 + 10915…10935 扫描")
         log("端口测试用 \(Self.probePort)；投屏链路按 1.0.83 自己的阶梯发现车机")
@@ -93,8 +96,9 @@ final class CfMotoEasyConnOutput {
     func toggleTestPattern(host: String, port: UInt16) {
         if engine.testPattern {
             engine.stopTestPattern()
-            log("测试图案已关闭")
+            log("测试图案：关 —— 停止测试链路")
         } else {
+            log("测试图案：开 —— 启动本机端口并探测 \(host):\(port)")
             engine.startTestPattern(host: host, port: String(port))
         }
     }
@@ -125,7 +129,11 @@ final class CfMotoEasyConnOutput {
     /// 所以「通」意味着握手阶段也能过。
     func probe(host: String, port: UInt16 = 10930, timeout: TimeInterval = 3,
                completion: @escaping (String, Bool) -> Void) {
-        engine.testDashPort(host: host, port: port, completion: completion)
+        engine.testDashPort(host: host, port: port) { [weak self] message, ok in
+            // 1.0.83 把探测结果也写进 EasyConn 日志，车边排查时能对上时间点。
+            self?.log(message)
+            completion(message, ok)
+        }
     }
 
     // MARK: - 日志网页
@@ -156,7 +164,7 @@ final class CfMotoEasyConnOutput {
 
     // MARK: - 日志
 
-    private func log(_ line: String) {
+    func log(_ line: String) {
         store.append(line)
         onLog?(line)
     }

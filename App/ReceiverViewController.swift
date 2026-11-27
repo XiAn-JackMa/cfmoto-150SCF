@@ -408,6 +408,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var displayedVideo = false
     private var identity: AccessoryIdentity?
     private var running = false
+    /// 春风 EasyConn 的首页实时读数（版式照 1.0.83）：启动按钮下方 4 行、预览下方 1 行。
+    private let outputInfoLabel = UILabel()
+    private let previewInfoLabel = UILabel()
+    private var liveInfoTimer: Timer?
     private var checkingForUpdates = false
     private var updateCheckTask: Task<Void, Never>?
     private var updateTimer: Timer?
@@ -542,6 +546,17 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         startButton.configuration?.imagePadding = 8
         startButton.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24)
         heroStack.addArrangedSubview(startButton)
+
+        // 启动按钮正下方的实时读数（1.0.83 原样）：车机画布、实际送出的码率、是否被缩放——
+        // 画面变糊或卡顿时，这三项能直接说明原因。
+        outputInfoLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        outputInfoLabel.textColor = .secondaryLabel
+        outputInfoLabel.numberOfLines = 0
+        outputInfoLabel.textAlignment = .center
+        outputInfoLabel.lineBreakMode = .byWordWrapping
+        outputInfoLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        outputInfoLabel.isHidden = true
+        heroStack.addArrangedSubview(outputInfoLabel)
 
         let browserIcon = UIImageView(image: UIImage(systemName: "globe"))
         browserIcon.tintColor = .systemGreen; browserIcon.contentMode = .scaleAspectFit
@@ -690,6 +705,15 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         videoHeight.priority = .defaultLow
         videoHeight.isActive = true
         stack.addArrangedSubview(inlineVideoContainer)
+        // 画面正下方的「源侧」读数（1.0.83 原样）：CarPlay 自己产出的尺寸/帧率/码率，
+        // 与按钮下方那行（车机实际收到的）对照，就能看出是不是车机拉得比 CarPlay 快。
+        previewInfoLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        previewInfoLabel.textColor = .secondaryLabel
+        previewInfoLabel.numberOfLines = 0
+        previewInfoLabel.textAlignment = .center
+        previewInfoLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        previewInfoLabel.isHidden = true
+        stack.addArrangedSubview(previewInfoLabel)
         videoActions.addArrangedSubview(fullscreenButton)
         videoActions.addArrangedSubview(pictureInPictureButton)
         videoActions.axis = .horizontal; videoActions.distribution = .fillEqually; videoActions.spacing = 10
@@ -730,6 +754,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             stack.widthAnchor.constraint(lessThanOrEqualToConstant: 720)
         ])
         receiver.onLog = { [weak self] in self?.log($0) }; bluetooth.onLog = { [weak self] in self?.log($0) }
+        // EasyConn 引擎的行已经由 CfMotoLogStore 写过一次，这里只上屏，不再镜像回日志环。
+        receiver.onEasyConnLog = { [weak self] in self?.log($0, mirrorToStore: false) }
+        // 1.0.83：10950 日志网页随 App 启动就能访问，不必先进设置页、也不必先启动 CarPlay。
+        receiver.easyConnOutput.ensureLogServer()
+        startLiveInfoTimer()
         receiver.onControlConnected = { [weak self] in self?.sameDevice.didConnectControl() }
         receiver.onVideo = { [weak self] data, codec in
             guard let self, self.running else { return }
@@ -2234,7 +2263,49 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
     }
     @objc private func copyLog() { UIPasteboard.general.string = lines.joined(separator: "\n") }
-    private func log(_ message: String) {
+    // MARK: - 春风 EasyConn 首页实时读数（1.0.83 原样）
+
+    /// 0.5 秒一次刷两处读数。1.0.83 是在启动时起、停止时关；这里常驻，靠 `updateLiveInfo()` 自己判断，
+    /// 这样重连、自动重启等路径不会漏掉，代价只是非 EasyConn 模式下每 0.5 秒一次空转。
+    private func startLiveInfoTimer() {
+        liveInfoTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.updateLiveInfo()
+        }
+        timer.tolerance = 0.1
+        liveInfoTimer = timer
+        updateLiveInfo()
+    }
+
+    private func updateLiveInfo() {
+        guard running, outputMode == .cfmotoEasyConn else {
+            outputInfoLabel.isHidden = true
+            previewInfoLabel.isHidden = true
+            return
+        }
+        let s = receiver.easyConnOutput.liveStats
+        var infoLines = [
+            String(format: "车机 %@ · %.1f fps · %.1f Mbps", s.canvasSize, s.servedFPS, s.bitrateMbps)
+        ]
+        if CfMotoTuning.staticPadEnabled {
+            let reuse = s.padReuses > 0 ? " · 已复用 \(s.padReuses) 次" : ""
+            infoLines.append(s.staticPadNote.isEmpty
+                ? "静止补帧：等待静止…"
+                : "静止补帧：\(s.staticPadNote)\(reuse)")
+        }
+        infoLines.append("CarPlay \(s.carPlaySize) · \(s.scaleText == "1:1" ? "不缩放" : "缩放 \(s.scaleText)")")
+        let repeatedKeyframe = Int(s.paddedRatio * 100)
+        let freshKeyframe = max(0, Int((s.keyframeRatio - s.paddedRatio) * 100))
+        let freshP = max(0, Int((1.0 - s.keyframeRatio) * 100))
+        infoLines.append("重复关键帧 \(repeatedKeyframe)% · 新压关键帧 \(freshKeyframe)% · 新画面 P 帧 \(freshP)% · 每帧 \(String(format: "%.1f", s.averageFrameKB)) KB")
+        outputInfoLabel.text = infoLines.joined(separator: "\n")
+        outputInfoLabel.isHidden = false
+        previewInfoLabel.text = String(format: "CarPlay %@ · %.1f fps · %.1f Mbps · %@",
+                                       s.carPlaySize, s.sourceFPS, s.sourceMbps, s.scaleText)
+        previewInfoLabel.isHidden = !displayedVideo
+    }
+
+    private func log(_ message: String, mirrorToStore: Bool = true) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         lines.append("\(timestamp)  \(message)"); if lines.count > 200 { lines.removeFirst(lines.count - 200) }
         if logView.window != nil {
@@ -2242,6 +2313,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             if !logView.text.isEmpty { logView.scrollRangeToVisible(NSRange(location: logView.text.utf16.count - 1, length: 1)) }
         }
         LocalDiagnosticLog.append("\(timestamp)  \(message)")
+        // 1.0.83：导出的 EasyConn 日志以前只有 EasyConn 行，一次根本没出画面的 CarPlay 会话
+        // 在日志里毫无痕迹，所以 App 侧每一行都镜像进同一个日志环。EasyConn 引擎自己的行已经
+        // 由 `CfMotoLogStore` 写过，那些走 `onEasyConnLog` → `mirrorToStore: false`。
+        if mirrorToStore { receiver.appendEasyConnLog(message) }
         NSLog("[CarWithin] %@", message)
     }
 }
