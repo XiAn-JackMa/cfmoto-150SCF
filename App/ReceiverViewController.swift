@@ -1189,7 +1189,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         card.layer.cornerCurve = .continuous
     }
 
-    @discardableResult
     private struct ConnectionCardLabels {
         let title: UILabel
         let help: UILabel
