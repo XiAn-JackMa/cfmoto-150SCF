@@ -17,23 +17,37 @@ struct EasyConnEncodedFrame {
 }
 
 private final class EasyConnCallbackBox {
-    var handler: ((Result<EasyConnEncodedFrame, Error>) -> Void)?
+    /// `invalidate()` nils the handler from one thread while VideoToolbox may be calling it from
+    /// another; the lock keeps that swap safe, and `deliver` copies the closure before calling it
+    /// so the call itself never runs with the box lock held.
+    private let lock = NSLock()
+    private var stored: ((Result<EasyConnEncodedFrame, Error>) -> Void)?
+
+    var handler: ((Result<EasyConnEncodedFrame, Error>) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+
+    func deliver(_ result: Result<EasyConnEncodedFrame, Error>) {
+        let handler = self.handler
+        handler?(result)
+    }
 }
 
 private let h264CompressionCallback: VTCompressionOutputCallback = { reference, _, status, infoFlags, sampleBuffer in
     guard let reference else { return }
     let box = Unmanaged<EasyConnCallbackBox>.fromOpaque(reference).takeUnretainedValue()
     guard status == noErr else {
-        box.handler?(.failure(EasyConnH264EncoderError.compression(status)))
+        box.deliver(.failure(EasyConnH264EncoderError.compression(status)))
         return
     }
     // RealTime + 码率上限下，VideoToolbox 会主动丢帧并回调空 sampleBuffer，这是正常行为
     if infoFlags.contains(.frameDropped) || sampleBuffer == nil {
-        box.handler?(.failure(EasyConnH264EncoderError.frameDropped))
+        box.deliver(.failure(EasyConnH264EncoderError.frameDropped))
         return
     }
     guard let sampleBuffer, CMSampleBufferDataIsReady(sampleBuffer) else {
-        box.handler?(.failure(EasyConnH264EncoderError.missingSampleBuffer))
+        box.deliver(.failure(EasyConnH264EncoderError.missingSampleBuffer))
         return
     }
 
@@ -96,13 +110,13 @@ private let h264CompressionCallback: VTCompressionOutputCallback = { reference, 
         ) else {
             throw EasyConnH264EncoderError.missingParameterSets
         }
-        box.handler?(.success(EasyConnEncodedFrame(
+        box.deliver(.success(EasyConnEncodedFrame(
             data: annexB,
             isKeyframe: isKeyframe,
             presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         )))
     } catch {
-        box.handler?(.failure(error))
+        box.deliver(.failure(error))
     }
 }
 
@@ -273,11 +287,19 @@ final class EasyConnH264Encoder {
     }
 
     func invalidate() {
-        lock.lock(); defer { lock.unlock() }
-        guard let session else { return }
-        VTCompressionSessionInvalidate(session)
+        // Detach the callback and drop the session UNDER the lock, but drain and invalidate OUTSIDE
+        // it. `VTCompressionSessionInvalidate` blocks until the in-flight frame has been delivered,
+        // and that delivery wants the frame source's lock — which `encode()` holds while it takes
+        // this one. Holding this lock across the invalidate is exactly the ABBA pair that made rapid
+        // start/stop wedge the app. With `handler` already nil the in-flight callback is a no-op, so
+        // it can no longer reach the source lock at all.
+        lock.lock()
+        guard let session else { lock.unlock(); return }
         self.session = nil
         callbackBox.handler = nil
+        lock.unlock()
+        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        VTCompressionSessionInvalidate(session)
     }
 
     private func set(_ key: CFString, value: CFTypeRef) throws {

@@ -28,25 +28,28 @@ final class CfMotoOutput {
     /// Recreated on every start: shutting a source down closes its frame queue, so reusing the
     /// instance after Stop would leave the next session with a queue nothing can push into.
     private var source = CfMotoVideoSource()
+    /// Bumped by every `stop()`. A delayed `performStart` compares it and gives up, so a Stop clicked
+    /// while the restart cooldown is running cannot bring a ghost session up afterwards.
+    private var sessionGeneration = 0
     /// Serve colour bars instead of CarPlay frames (bench test of the link alone).
     private(set) var testPattern = false
 
     /// Hard reset of the video pipeline (decoder + queues + keyframe), used when the app returns to
     /// the foreground: the decompression session is what does not survive being backgrounded.
     /// Re-applies the manual bitrate/profile overrides to the running session.
-    func applyTuning() { source.reloadTuning() }
+    func applyTuning() { lock.withLock { source }.reloadTuning() }
     /// The app left or returned to the foreground: the hardware encoder does not survive that.
-    func setBackgrounded(_ value: Bool) { source.setBackgrounded(value) }
+    func setBackgrounded(_ value: Bool) { lock.withLock { source }.setBackgrounded(value) }
 
     func resynchronizeVideo() {
-        source.resynchronize()
+        lock.withLock { source }.resynchronize()
         log("回到前台，已重建视频管线")
     }
 
     /// Live toggle: applies to the running link as well as the next start.
     func setTestPattern(_ on: Bool) {
         testPattern = on
-        source.setTestPattern(on)
+        lock.withLock { source }.setTestPattern(on)
         log("测试图案 \(on ? "已开启" : "已关闭")")
     }
     /// Start the EasyConn link standalone to serve the test pattern, without a CarPlay session.
@@ -136,8 +139,10 @@ final class CfMotoOutput {
         pendingStart?.cancel()
         pendingStart = nil
         stop()
+        // Captured after the cleanup stop() above, so this start's own stop does not invalidate it.
+        let generation = lock.withLock { sessionGeneration }
         guard wait > 0 else {
-            performStart(localAddress: localAddress, targetAddress: targetAddress, port: port)
+            performStart(localAddress: localAddress, targetAddress: targetAddress, port: port, generation: generation)
             return
         }
         // Give the dash a moment to finish its own teardown: an abrupt close is only visible to it
@@ -147,15 +152,24 @@ final class CfMotoOutput {
             try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
             self.pendingStart = nil
-            self.performStart(localAddress: localAddress, targetAddress: targetAddress, port: port)
+            self.performStart(localAddress: localAddress, targetAddress: targetAddress, port: port,
+                              generation: generation)
         }
     }
 
-    private func performStart(localAddress: String, targetAddress: String, port: String) {
-        // A fresh frame source per session (see the property comment).
-        source = CfMotoVideoSource()
-        source.testPattern = testPattern
-        source.log = { [weak self] line in
+    private func performStart(localAddress: String, targetAddress: String, port: String, generation: Int) {
+        // A Stop clicked while the cooldown was running must win: without this the delayed start
+        // would bring a link up after the card already read "已停止".
+        guard lock.withLock({ sessionGeneration == generation }) else {
+            log("已在启动前收到停止请求，本次启动放弃")
+            return
+        }
+        // A fresh frame source per session (see the property comment). It is configured before the
+        // swap so no reader can see a half-configured instance, and the old one is only shut down
+        // after the swap so a racing stop() cannot close the queue this session pulls from.
+        let fresh = CfMotoVideoSource()
+        fresh.testPattern = testPattern
+        fresh.log = { [weak self] line in
             guard let self else { return }
             self.lock.lock()
             self.recent.append(line)
@@ -164,7 +178,12 @@ final class CfMotoOutput {
             self.store.append(line)
             self.onLog?(line)
         }
-        source.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?() }
+        fresh.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?() }
+        lock.lock()
+        let previous = source
+        source = fresh
+        lock.unlock()
+        previous.shutdown()
         lastState = "未启动"
         lock.lock(); sessionCanvas = nil; lock.unlock()
 
@@ -199,11 +218,23 @@ final class CfMotoOutput {
         // also avoids the mDNS permissions the browser would need.
         let link = EasyConnLink(configuration: configuration,
                                 network: POSIXNetworkProvider(),
-                                frameSource: source,
+                                frameSource: fresh,
                                 signer: signer,
                                 discovery: nil,
                                 gateway: dash.isEmpty ? nil : dash)
-        lock.lock(); self.link = link; lock.unlock()
+        lock.lock()
+        // The generation is re-checked here and not only at the top of performStart: building the
+        // link takes long enough for a Stop to arrive in between, and installing it afterwards is
+        // what let a stopped session come back to life a second later.
+        guard sessionGeneration == generation else {
+            lock.unlock()
+            link.stop()
+            fresh.shutdown()
+            log("已在启动前收到停止请求，本次启动放弃")
+            return
+        }
+        self.link = link
+        lock.unlock()
 
         // Core knows why a session ended (watchdog, peer closed, handshake rejected) but reports it
         // through its own Log. Forward the link-relevant lines into our store, otherwise a field log
@@ -281,15 +312,15 @@ final class CfMotoOutput {
                 // Always log the counters: replacing them with a warning hid the one thing needed to
                 // tell a CarPlay problem from an EasyConn one.
                 self.logDiagnosticIfDue()
-                let idle = self.source.inboundIdle
+                let idle = self.lock.withLock { self.source }.inboundIdle
                 if idle > 5 {
-                    self.log("[画面] \(self.source.counters)")
+                    self.log("[画面] \(self.lock.withLock { self.source }.counters)")
                     // The dash is showing black because CarPlay has not produced a picture; that is a
                     // CarPlay session problem, not an EasyConn one. One line, and only when the
                     // silence changes, so a long black period does not bury the log.
                     self.noteCarPlaySilence(idle)
                 } else {
-                    self.log("[画面] \(self.source.counters)")
+                    self.log("[画面] \(self.lock.withLock { self.source }.counters)")
                     self.lastSilenceSeconds = 0
                 }
                 // Counters go to the log view only. Raising the status label here would rebuild the
@@ -301,18 +332,18 @@ final class CfMotoOutput {
 
     func append(_ data: Data, codec: VideoCodec, keyframe: Bool) {
         guard lock.withLock({ link != nil }) else { return }
-        source.append(data, codec: codec, keyframe: keyframe)
+        lock.withLock { source }.append(data, codec: codec, keyframe: keyframe)
     }
 
     /// Everything needed to diagnose a stalled link, for the settings screen's copy button.
     /// Live snapshot for the readouts on the home screen and above the preview.
-    var liveStats: CfMotoLiveStats { source.liveStats }
+    var liveStats: CfMotoLiveStats { lock.withLock { source }.liveStats }
 
     var diagnostics: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         let (isUp, tail) = lock.withLock { (link != nil, recent.suffix(8).joined(separator: " || ")) }
-        let head = "CarWithin \(version) (\(build)) · CFMOTO \(lastState) · \(source.counters) · " +
+        let head = "CarWithin \(version) (\(build)) · CFMOTO \(lastState) · \(lock.withLock { source }.counters) · " +
             (isUp ? "link=up" : "link=down")
         return tail.isEmpty ? head : head + "\n--- 最近日志 ---\n" + tail
     }
@@ -323,6 +354,8 @@ final class CfMotoOutput {
         return lines.isEmpty ? head : head + "\n--- 日志 ---\n" + lines.joined(separator: "\n")
     }
 
+    /// - Note: callers already hold lock (logDump), so this must read source directly.
+    ///   Taking the lock again here is a self-deadlock: NSLock is not recursive.
     private func diagnosticsHeadUnlocked() -> String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
@@ -342,7 +375,7 @@ final class CfMotoOutput {
     private func logDiagnosticIfDue() {
         guard Date().timeIntervalSince(lastDiagnosticAt) >= 10 else { return }
         lastDiagnosticAt = Date()
-        let s = source.liveStats
+        let s = lock.withLock { source }.liveStats
         var text = "[诊断] 车机画面 \(s.canvasSize) ← CarPlay \(s.carPlaySize) · " +
             (s.scaleText == "1:1" ? "尺寸一致，不缩放" : "缩放 \(s.scaleText)（画面会变糊）") +
             String(format: " · 每秒送 %.1f 帧 · 重复画面 %.0f%% · 关键帧 %.0f%% · 每帧 %.1f KB · 约 %.1f Mbps",
@@ -359,7 +392,8 @@ final class CfMotoOutput {
     /// was in fact showing a perfectly good frozen map was simply wrong, so this now speaks only
     /// when nothing has ever been served.
     private func noteCarPlaySilence(_ idle: TimeInterval) {
-        guard !source.liveStats.hasPicture else { return }
+        let active = lock.withLock { source }
+        guard !active.liveStats.hasPicture else { return }
         let seconds = Int(idle)
         guard seconds / 10 != lastSilenceSeconds / 10 else { return }
         lastSilenceSeconds = seconds
@@ -379,6 +413,9 @@ final class CfMotoOutput {
         lock.lock()
         let current = link
         link = nil
+        // Invalidates a delayed start that is still sleeping out the cooldown.
+        sessionGeneration += 1
+        let dyingSource = source
         lock.unlock()
         // Stop the link BEFORE cancelling the pump: link.stop() publishes .state(.stopped), and a
         // pump that is already cancelled drops it, which left the log ending mid-sentence and made
@@ -386,7 +423,9 @@ final class CfMotoOutput {
         current?.stop()
         pump?.cancel(); pump = nil
         ticker?.cancel(); ticker = nil
-        source.shutdown()
+        // Shuts down the source captured under the lock, not whatever `source` points at now: a
+        // concurrent performStart may already have installed the next session's instance.
+        dyingSource.shutdown()
         // The cooldown only matters when a link was actually up: NativeReceiver starts by calling
         // stop() as its own cleanup, and counting that would delay every single start by it.
         if current != nil {

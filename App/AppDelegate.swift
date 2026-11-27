@@ -2,6 +2,14 @@ import UIKit
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // 侧载包，手机上没有调试器可挂：把上一次的未捕获异常记在 UserDefaults 里，下次启动时
+        // `CfMotoLogStore` 会把它写成日志第三行的 `上次闪退: …`。没有这一句，闪退就是无声的。
+        CrashCatcher.install()
+        return true
+    }
+
     func application(_ application: UIApplication, configurationForConnecting connectingSceneSession: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         let configuration = UISceneConfiguration(name: "Receiver", sessionRole: connectingSceneSession.role)

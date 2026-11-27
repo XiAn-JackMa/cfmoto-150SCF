@@ -807,46 +807,71 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self?.receiver.touches(source: "local", points)
             self?.refreshFullscreenExitButton()
         }
+        // 各输出的状态回调都来自它自己的队列（`NativeReceiver` 只做转发），而卡片是 UIKit：
+        // 一律先回主线程。否则反复启动/关闭时会在后台线程改 label，UIKit 直接抛
+        // `NSInternalInconsistencyException` 把进程带走（1.0.83 的接线注释写的是同一件事）。
         receiver.onZeehoState = { [weak self] message in
-            guard let self, self.running, self.outputMode.zeehoProfile != nil else { return }
-            self.updateZeehoStatus(message)
+            DispatchQueue.main.async {
+                guard let self, self.running, self.outputMode.zeehoProfile != nil else { return }
+                self.updateZeehoStatus(message)
+            }
         }
         receiver.onMotorcycleState = { [weak self] message in
-            guard let self, self.running, self.outputMode.motorcycleProfile != nil else { return }
-            self.updateMotorcycleStatus(message)
+            DispatchQueue.main.async {
+                guard let self, self.running, self.outputMode.motorcycleProfile != nil else { return }
+                self.updateMotorcycleStatus(message)
+            }
         }
         receiver.onCfmotoState = { [weak self] message in
-            guard let self, self.running, self.outputMode.cfmoto else { return }
-            self.updateCfmotoStatus(message)
+            DispatchQueue.main.async {
+                guard let self, self.running, self.outputMode.cfmoto else { return }
+                self.updateCfmotoStatus(message)
+            }
         }
         receiver.onNinebotState = { [weak self] message in
-            guard let self, self.running, self.outputMode.ninebotMode != nil else { return }
-            self.updateNinebotStatus(message)
+            DispatchQueue.main.async {
+                guard let self, self.running, self.outputMode.ninebotMode != nil else { return }
+                self.updateNinebotStatus(message)
+            }
         }
         receiver.onTailingState = { [weak self] message in
-            guard let self, self.running, self.outputMode == .tailing else { return }
-            self.updateTailingStatus(message)
+            DispatchQueue.main.async {
+                guard let self, self.running, self.outputMode == .tailing else { return }
+                self.updateTailingStatus(message)
+            }
         }
         receiver.onCarLifeState = { [weak self] message in
-            guard let self, self.running, self.outputMode == .carLife else { return }
-            self.updateCarLifeStatus(message)
+            DispatchQueue.main.async {
+                guard let self, self.running, self.outputMode == .carLife else { return }
+                self.updateCarLifeStatus(message)
+            }
         }
-        receiver.onBrowserDisplay = { [weak self] display, viewerID in self?.browserReportedDisplay(display, viewerID: viewerID) }
-        receiver.onBrowserStruggling = { [weak self] peer, reason in self?.browserStruggling(peer: peer, reason: reason) }
+        receiver.onBrowserDisplay = { [weak self] display, viewerID in
+            DispatchQueue.main.async { self?.browserReportedDisplay(display, viewerID: viewerID) }
+        }
+        receiver.onBrowserStruggling = { [weak self] peer, reason in
+            DispatchQueue.main.async { self?.browserStruggling(peer: peer, reason: reason) }
+        }
         receiver.onCarUIRequested = { [weak self] in
-            guard let self else { return }
-            self.log(CWL("在 CarPlay 中点按了 CarWithin 车辆按钮"))
-            self.hideFullscreen(); self.revealSettings()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.log(CWL("在 CarPlay 中点按了 CarWithin 车辆按钮"))
+                self.hideFullscreen(); self.revealSettings()
+            }
         }
         receiver.onAirPlayReady = { [weak self] id in
-            guard let self, self.airPlayStreamID == id else { return }
-            self.airPlayReady = true
-            self.startAirPlayTransport()
+            DispatchQueue.main.async {
+                guard let self, self.airPlayStreamID == id else { return }
+                self.airPlayReady = true
+                self.startAirPlayTransport()
+            }
         }
         receiver.onVideoOutputState = { [weak self] message in
-            self?.portStatus.text = message
-            self?.browserViewersLabel.text = message
-            if let self, self.outputMode == .airPlay, self.running, !self.airPlayReady { self.updateAirPlayStatus(message) }
+            DispatchQueue.main.async {
+                self?.portStatus.text = message
+                self?.browserViewersLabel.text = message
+                if let self, self.outputMode == .airPlay, self.running, !self.airPlayReady { self.updateAirPlayStatus(message) }
+            }
         }
         pictureInPicture.onLog = { [weak self] in self?.log($0) }
         pictureInPicture.onFailure = { [weak self] in
@@ -2306,6 +2331,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
 
     private func log(_ message: String, mirrorToStore: Bool = true) {
+        // 各模块（视频解码、蓝牙、EasyConn 引擎…）都会从自己的队列写日志，而这个方法同时改
+        // `lines` 和 `logView`（UIKit）。后台线程先回主线程——1.0.83 的 `appendCfMotoLog`
+        // 也是这么守的，否则反复启动/关闭时必崩。
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.log(message, mirrorToStore: mirrorToStore) }
+            return
+        }
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         lines.append("\(timestamp)  \(message)"); if lines.count > 200 { lines.removeFirst(lines.count - 200) }
         if logView.window != nil {
