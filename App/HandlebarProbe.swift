@@ -108,11 +108,14 @@ final class HandlebarProbe: @unchecked Sendable {
         guard !isRunning else { return }
         isRunning = true
         lock.lock()
-        screenLocked = !UIApplication.shared.isProtectedDataAvailable
+        // 锁屏/后台都可作为「骑行中」的信号。isProtectedDataAvailable 在 App 未启用
+        // Data Protection 时始终为 true，因此再叠加 applicationState == .background 兜底。
+        screenLocked = UIApplication.shared.applicationState == .background
+            || !UIApplication.shared.isProtectedDataAvailable
         lock.unlock()
         observeLockState()
         startVolumeObservation()
-        onLog?("[车把] 已启用：锁屏时音量键＝车把按键，目标音量 \(Self.targetVolumePercent)%")
+        onLog?("[车把] 已启用：锁屏/后台时音量键＝车把按键，目标音量 \(Self.targetVolumePercent)%")
     }
 
     func stop() {
@@ -129,23 +132,38 @@ final class HandlebarProbe: @unchecked Sendable {
         onLog?("[车把] 已停用")
     }
 
-    // MARK: 锁屏
+    // MARK: 锁屏 / 后台
 
     private func observeLockState() {
         removeLockObservers()
         let center = NotificationCenter.default
         lockObservers = [
+            // 进后台（锁屏、切 App）→ 当作骑行中，音量键开始驱动 CarPlay。
+            center.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.lock.lock(); self.screenLocked = true; self.lock.unlock()
+                self.onLog?("[车把] 已进入后台：音量键开始当作车把按键")
+            },
+            // 回前台（解锁、切回）→ 音量键恢复正常调音量。
+            center.addObserver(forName: UIApplication.willEnterForegroundNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.lock.lock(); self.screenLocked = false; self.lock.unlock()
+                self.onLog?("[车把] 已回前台：音量键恢复正常调音量")
+            },
+            // 若 App 启用了 Data Protection，锁屏/解锁会更精确，也一并监听。
             center.addObserver(forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
                                object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
                 self.lock.lock(); self.screenLocked = true; self.lock.unlock()
-                self.onLog?("[车把] 已锁屏：音量键开始当作车把按键")
+                self.onLog?("[车把] 已锁屏（数据保护）：音量键开始当作车把按键")
             },
             center.addObserver(forName: UIApplication.protectedDataDidBecomeAvailableNotification,
                                object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
                 self.lock.lock(); self.screenLocked = false; self.lock.unlock()
-                self.onLog?("[车把] 已解锁：音量键恢复正常调音量")
+                self.onLog?("[车把] 已解锁（数据保护）：音量键恢复正常调音量")
             }
         ]
     }
