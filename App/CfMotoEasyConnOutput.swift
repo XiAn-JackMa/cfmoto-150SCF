@@ -252,19 +252,6 @@ final class CfMotoEasyConnOutput {
         logServer.onLog = { [weak self] line in self?.store.append(line) }
         logServer.start()
         log("日志服务地址：\(logURL)（手机自身的浏览器可用 http://127.0.0.1:\(CfMotoLogServer.defaultPort)/）")
-        // 日志首行是在 App 启动那一瞬拼的，那时系统 SSID 还没读回来；这里补一行说明最终结果。
-        SystemWiFiName.onResolved = { [weak self] result in
-            switch result {
-            case .available(let name):
-                self?.log("[网络] 系统 Wi-Fi：\(name)（日志首行的 Wi-Fi 是启动时的快照）")
-            case .locationDenied:
-                self?.log("[网络] 系统 Wi-Fi 读不到：未授权定位。日志里的 Wi-Fi 是预设值")
-            case .unavailable:
-                self?.log("[网络] 系统 Wi-Fi 读不到：有定位权限仍被拒绝（多半是签名没带 wifi-info 权限）。日志里的 Wi-Fi 是预设值")
-            case .notAttempted:
-                break
-            }
-        }
     }
 
     var logURL: String {

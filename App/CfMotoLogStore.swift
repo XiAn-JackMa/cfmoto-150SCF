@@ -66,17 +66,8 @@ final class CfMotoLogStore {
         let build = info?["CFBundleVersion"] as? String ?? "?"
         let device = "\(UIDevice.current.model) / iOS \(UIDevice.current.systemVersion)"
         let presetSSID = WiFiPresetStore.selected()?.ssid ?? "未设置"
-        // 系统 SSID 要定位授权 + wifi-info 权限才读得到，所以这里写清是「系统读到的」还是
-        // 「预设里填的」；读不到时把原因一起写出来，否则「日志里的 Wi-Fi 不对」永远说不清。
-        let wifi: String
-        switch SystemWiFiName.currentStatus {
-        case .available(let name): wifi = "Wi-Fi \(name)（系统）"
-        case .locationDenied: wifi = "Wi-Fi 预设 \(presetSSID)（系统名称需定位权限）"
-        case .unavailable: wifi = "Wi-Fi 预设 \(presetSSID)（系统名称读取失败）"
-        case .notAttempted: wifi = "Wi-Fi 预设 \(presetSSID)"
-        }
         return "版本 \(version) (\(build)) · \(device) · 本地IP \(ReceiverConfiguration.wifiIPv4Address() ?? "-")" +
-            " · \(wifi)"
+            " · Wi-Fi 预设 \(presetSSID)"
     }
 
     func append(_ message: String) {

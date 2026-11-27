@@ -258,8 +258,9 @@ final class CfMotoOutput {
         }
 
         log("==== EasyConn 目标 \(dash.isEmpty ? "网关" : dash):\(port) · profile=legacy · 测试图案\(testPattern ? "开" : "关") ====")
-        // 每次启动都记一份当下的网络身份：系统 SSID 读得到就用真的，读不到就标明是预设值。
-        let wifiName = SystemWiFiName.current ?? "预设 \(WiFiPresetStore.selected()?.ssid ?? "未设置")"
+        // 每次启动都记一份当下的网络身份：Wi-Fi 名用预设值（系统 SSID 需定位授权与 wifi-info
+        // 权限，侧载签名读不到，所以不再尝试读系统名称）。
+        let wifiName = "预设 \(WiFiPresetStore.selected()?.ssid ?? "未设置")"
         log("版本 \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")" +
             " (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))" +
             " · \(UIDevice.current.model) iOS \(UIDevice.current.systemVersion)" +

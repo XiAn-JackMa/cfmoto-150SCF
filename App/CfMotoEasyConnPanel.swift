@@ -350,7 +350,7 @@ final class CfMotoEasyConnPanel {
         let body = [
             alignedRow("软件版本", "\(name) \(version) (\(build))"),
             alignedRow("iOS 版本", UIDevice.current.systemVersion),
-            alignedRow("Wi-Fi 名", currentWiFiText),
+            alignedRow("Wi-Fi", currentWiFiText),
             alignedRow("本地 IP", ReceiverConfiguration.wifiIPv4Address() ?? "未连接 Wi-Fi"),
         ].joined(separator: "\n")
         guard infoBox.text != body else { return }
@@ -359,15 +359,10 @@ final class CfMotoEasyConnPanel {
         infoBox.contentOffset = offset
     }
 
-    /// Wi-Fi 名写清来源：系统读到的，还是预设里填的（读不到时把原因也写出来）。
+    /// Wi-Fi 名用预设里填的那个：系统 SSID 需要定位授权 + wifi-info 权限，侧载签名读不到，
+    /// 所以这里不再尝试读系统名称。
     private var currentWiFiText: String {
-        if let name = SystemWiFiName.current { return "\(name)（系统）" }
-        let preset = WiFiPresetStore.selected()?.ssid ?? "未设置"
-        switch SystemWiFiName.currentStatus {
-        case .locationDenied: return "\(preset)（预设·需定位权限）"
-        case .unavailable: return "\(preset)（预设·系统读取失败）"
-        default: return "\(preset)（预设）"
-        }
+        "\(WiFiPresetStore.selected()?.ssid ?? "未设置")（预设）"
     }
 
     /// 等宽字体下的对齐：中日韩字符按两格算，标签右侧补空格，让四行的值从同一列开始。

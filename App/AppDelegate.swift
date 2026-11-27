@@ -7,8 +7,6 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // 侧载包，手机上没有调试器可挂：把上一次的未捕获异常记在 UserDefaults 里，下次启动时
         // `CfMotoLogStore` 会把它写成日志第三行的 `上次闪退: …`。没有这一句，闪退就是无声的。
         CrashCatcher.install()
-        // 静默读一次系统 Wi-Fi 名称（不弹权限框）：日志首行要能区分「系统读到的」和「预设里填的」。
-        SystemWiFiName.prefetch()
         return true
     }
 
