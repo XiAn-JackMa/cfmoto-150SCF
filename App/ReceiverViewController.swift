@@ -232,6 +232,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
     private let ninebotCard = UIStackView()
     private var ninebotCardInstructions: UILabel?
+    /// 春风卡片的标题/说明/图标要跟着选择变：选 EasyConn 时用 1.0.83 那套文案。
+    private var cfmotoCardLabels: ConnectionCardLabels?
     private var ninebotInstructions: String {
         return outputMode == .ninebot
             ? CWL("连接仪表 Wi-Fi，先启动本机 CarPlay。没有画面时，再到九号出行开启投屏导航。")
@@ -614,7 +616,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         zeehoCard.addArrangedSubview(zeehoSettings)
         stack.addArrangedSubview(zeehoCard)
 
-        configureConnectionCard(cfmotoCard, title: "春风仪表连接", symbol: "scooter", color: .systemBlue,
+        cfmotoCardLabels = configureConnectionCard(cfmotoCard, title: "春风仪表连接", symbol: "scooter", color: .systemBlue,
             instructions: "让 iPhone 加入春风仪表 Wi-Fi，打开仪表投屏后启动 CarPlay。春风使用独立 PXC 会话（TCP 10920/10921/10922 + 10930 通知），由仪表回连后再逐帧拉画面。", status: cfmotoCardStatus)
         let cfmotoSettings = UIButton(type: .system)
         cfmotoSettings.configuration = .tinted()
@@ -630,7 +632,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         motorcycleCard.addArrangedSubview(motorcycleSettings); stack.addArrangedSubview(motorcycleCard)
 
         ninebotCardInstructions = configureConnectionCard(ninebotCard, title: CWL("九号仪表连接"), symbol: "scooter", color: .systemBlue,
-            instructions: ninebotInstructions, status: ninebotCardStatus)
+            instructions: ninebotInstructions, status: ninebotCardStatus).help
         let ninebotSettings = UIButton(type: .system)
         ninebotSettings.configuration = .tinted()
         ninebotSettings.configuration?.title = CWL("连接设置")
@@ -1188,8 +1190,16 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
 
     @discardableResult
+    private struct ConnectionCardLabels {
+        let title: UILabel
+        let help: UILabel
+        let status: UILabel
+        let icon: UIImageView
+    }
+
+    @discardableResult
     private func configureConnectionCard(_ card: UIStackView, title: String, symbol: String, color: UIColor,
-                                         instructions: String, status: UILabel) -> UILabel {
+                                         instructions: String, status: UILabel) -> ConnectionCardLabels {
         configureOutputCard(card)
         let icon = UIImageView(image: UIImage(systemName: symbol))
         icon.tintColor = color
@@ -1213,7 +1223,23 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         card.addArrangedSubview(header)
         card.addArrangedSubview(help)
         card.addArrangedSubview(status)
-        return help
+        return ConnectionCardLabels(title: titleLabel, help: help, status: status, icon: icon)
+    }
+
+    /// 首页春风卡片按当前选择换文案：EasyConn 用 1.0.83 的标题与说明，5 寸 / 6.2 寸 保持上游原文。
+    private func updateCfmotoCardCopy() {
+        guard let card = cfmotoCardLabels else { return }
+        if outputMode == .cfmotoEasyConn {
+            card.title.text = "春风 EasyConn 连接"
+            card.help.text = "让 iPhone 加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面，再启动 CarPlay。"
+            card.icon.image = UIImage(systemName: "motorcycle")
+            card.icon.tintColor = .systemGreen
+        } else {
+            card.title.text = "春风仪表连接"
+            card.help.text = "让 iPhone 加入春风仪表 Wi-Fi，打开仪表投屏后启动 CarPlay。春风使用独立 PXC 会话（TCP 10920/10921/10922 + 10930 通知），由仪表回连后再逐帧拉画面。"
+            card.icon.image = UIImage(systemName: "scooter")
+            card.icon.tintColor = .systemBlue
+        }
     }
 
     private func refreshBrowserAddressLabels() {
@@ -1247,6 +1273,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         if !running { updateNinebotStatus("等待启动 CarPlay · 仪表 IP：\(activeNinebotAddressField.text ?? "")") }
         motorcycleCard.isHidden = !showsLocalOutput || outputMode.motorcycleProfile == nil
         cfmotoCard.isHidden = !showsLocalOutput || !outputMode.cfmoto
+        updateCfmotoCardCopy()
         if !running {
             updateCfmotoStatus("等待启动 CarPlay · 仪表 IP：\(cfmotoAddressField.text?.isEmpty == false ? cfmotoAddressField.text! : "自动取网关")")
         }
