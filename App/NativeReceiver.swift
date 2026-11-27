@@ -66,6 +66,10 @@ final class NativeReceiver {
     private let motorcyclePXC = CfmotoOutput(name: "motorcycle-pxc")
     private let cfmoto5 = CfmotoOutput(name: "cfmoto5")
     private let cfmoto62 = CfmotoOutput(name: "cfmoto62")
+    /// 春风 EasyConn：上游 `PxcConnection` 负责链路，1.0.83 的视频源负责画面与画面参数。
+    /// 只有选中「春风 EasyConn」时才会启动，5 寸 / 6.2 寸 完全不经过它。
+    private let cfmotoEasyConn = CfMotoEasyConnOutput(name: "cfmoto-easyconn")
+    var easyConnOutput: CfMotoEasyConnOutput { cfmotoEasyConn }
     var onCfmotoState: ((String) -> Void)?
     private let tailing = TailingOutput()
     var onTailingState: ((String) -> Void)?
@@ -147,18 +151,29 @@ final class NativeReceiver {
             if let profile = configuration.cfmotoProfile,
                let target = configuration.cfmotoAddress.flatMap({ $0.isEmpty ? nil : $0 })
                    ?? PxcConnection.gateway(for: configuration.address) {
-                let output = profile == .sixInch ? self.cfmoto62 : self.cfmoto5
                 let phone = configuration.tailingPhoneInfo ?? TailingPhoneInfo(package: Bundle.main.bundleIdentifier ?? "CarWithin",
                     versionCode: Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0,
                     model: "iPhone", systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                     width: configuration.width, height: configuration.height, rotation: 1)
-                output.start(localAddress: configuration.address, targetAddress: target, phone: phone, profile: profile,
-                             onState: { [weak self] in self?.onCfmotoState?($0) },
-                             onLog: { [weak self] in self?.log($0) },
-                             requestKeyframe: { [weak self] in self?.requestKeyFrame(reason: "春风解码恢复") },
-                             onGiveUp: { [weak self] in
-                                 self?.queue.async { [weak self] in self?.fail("春风仪表持续连接失败超过 3 分钟，已停止 CarPlay") }
-                             })
+                if configuration.cfmotoTuned {
+                    self.cfmotoEasyConn.start(localAddress: configuration.address, targetAddress: target, phone: phone,
+                                              maxBitrate: profile.bitrate, maxFps: profile.fps,
+                                              onState: { [weak self] in self?.onCfmotoState?($0) },
+                                              onLog: { [weak self] in self?.log($0) },
+                                              onKeyframeRequest: { [weak self] in self?.requestKeyFrame(reason: "春风 EasyConn 解码恢复") },
+                                              onGiveUp: { [weak self] in
+                                                  self?.queue.async { [weak self] in self?.fail("春风仪表持续连接失败超过 3 分钟，已停止 CarPlay") }
+                                              })
+                } else {
+                    let output = profile == .sixInch ? self.cfmoto62 : self.cfmoto5
+                    output.start(localAddress: configuration.address, targetAddress: target, phone: phone, profile: profile,
+                                 onState: { [weak self] in self?.onCfmotoState?($0) },
+                                 onLog: { [weak self] in self?.log($0) },
+                                 requestKeyframe: { [weak self] in self?.requestKeyFrame(reason: "春风解码恢复") },
+                                 onGiveUp: { [weak self] in
+                                     self?.queue.async { [weak self] in self?.fail("春风仪表持续连接失败超过 3 分钟，已停止 CarPlay") }
+                                 })
+                }
             }
             if let profile = configuration.motorcycleProfile {
                 let address = configuration.motorcycleAddress ?? ""
@@ -405,6 +420,7 @@ final class NativeReceiver {
         motorcyclePXC.stop()
         cfmoto5.stop()
         cfmoto62.stop()
+        cfmotoEasyConn.stop()
         tailing.stop()
         carLink.stop()
         #if DEBUG
@@ -509,8 +525,12 @@ final class NativeReceiver {
                         else { self.motorcycle.append(data, codec: codec, keyframe: keyframe) }
                     }
                     if let cfmoto = configuration.cfmotoProfile {
-                        let output = cfmoto == .sixInch ? self.cfmoto62 : self.cfmoto5
-                        output.append(data, codec: codec, keyframe: keyframe)
+                        if configuration.cfmotoTuned {
+                            self.cfmotoEasyConn.append(data, codec: codec, keyframe: keyframe)
+                        } else {
+                            let output = cfmoto == .sixInch ? self.cfmoto62 : self.cfmoto5
+                            output.append(data, codec: codec, keyframe: keyframe)
+                        }
                     }
                     if configuration.tailingAddress != nil { self.tailing.append(data, codec: codec) }
                     if configuration.carLifeEnabled { self.carLife.append(data, codec: codec) }

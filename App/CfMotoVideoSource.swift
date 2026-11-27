@@ -768,6 +768,19 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         queue.close()
     }
 
+    /// Re-arm after `shutdown()`.
+    ///
+    /// `shutdown()` latches `stopped` and closes the frame queue so a stale session cannot
+    /// leak frames into the next one; a later `start()` therefore has to undo both before
+    /// `prepare` can encode again. Upstream 1.0.83 only ever tore the source down for good,
+    /// so this has no counterpart there.
+    func restart() {
+        lock.lock()
+        stopped = false
+        lock.unlock()
+        queue.reopen()
+    }
+
     // MARK: - CarPlay input
 
     /// Called by the receiver for every access unit CarPlay produces. Never blocks the caller.

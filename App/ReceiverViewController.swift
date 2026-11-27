@@ -12,6 +12,8 @@ import Security
 
 final class ReceiverViewController: UIViewController, CLLocationManagerDelegate {
     private let receiver = NativeReceiver()
+    /// 春风 EasyConn 的画面参数面板（只在选中 EasyConn 时出现）。
+    private let easyConnPanel = CfMotoEasyConnPanel()
     private let antBMS = ANTBMSController()
     private let bluetooth = BLEBootstrap()
     private let sameDevice = SameDeviceProbe()
@@ -1320,6 +1322,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         if let profile = cfmotoProfile {
             config.cfmotoAddress = (cfmotoAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             config.cfmotoProfile = profile
+            config.cfmotoTuned = outputMode == .cfmotoEasyConn
         }
         if let mode = outputMode.ninebotMode {
             config.ninebotAddress = (activeNinebotAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3101,11 +3104,28 @@ extension ReceiverViewController {
                 }
                 rows.append(.note(zeehoStatus))
                 return [SettingsSection(name, footer: CWL("先在 CarWithin 点“启动本机 CarPlay”。若仪表没出画，保持 CarWithin 运行，再去极核 APP 打开仪表投屏导航。仪表出画后立刻切回或划掉极核 APP。声音由 iPhone 或蓝牙输出。"), rows)]
-            case .cfmoto5, .cfmoto62, .cfmotoEasyConn:
+            case .cfmoto5, .cfmoto62:
                 return [SettingsSection(headUnitOutput.selectedTitle, footer: "iPhone 加入春风仪表 Wi-Fi 并开启仪表投屏，TCP 10920/10921/10922，探测 10930。留空 IP 时尝试同网段 .1，失败请填写实际仪表 IP。", [
                     .field(CWL("仪表 IP 地址"), cfmotoAddressField, placeholder: "留空尝试 .1"),
                     .note(cfmotoStatus)
                 ])]
+            case .cfmotoEasyConn:
+                // 面板拿到输出实例与仪表 IP，才能在设置页里做端口测试、改参数、看日志。
+                easyConnPanel.output = receiver.easyConnOutput
+                easyConnPanel.addressProvider = { [weak self] in
+                    (self?.cfmotoAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                easyConnPanel.onChange = { [weak self] in
+                    (self?.settingsNavigation?.topViewController as? SettingsPageController)?.reload()
+                }
+                var sections: [SettingsSection] = [
+                    SettingsSection(headUnitOutput.selectedTitle, footer: CWL("EasyConn 走 6.2 寸的仪表规格（1024×515）。画面参数、端口测试、测试图案与日志都在下面，只影响这一项。"), [
+                        .field(CWL("仪表 IP 地址"), cfmotoAddressField, placeholder: "留空尝试 .1"),
+                        .note(cfmotoStatus)
+                    ])
+                ]
+                sections.append(contentsOf: easyConnPanel.sections())
+                return sections
             case .ninebot, .ninebotSeven, .ninebot43:
                 let fiveInch = outputMode == .ninebot
                 let startup = ninebotInstructions

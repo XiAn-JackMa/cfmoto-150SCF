@@ -38,6 +38,8 @@ struct ReceiverConfiguration {
     /// 留空表示自动取本机所在网段的网关（仪表热点一般是 .1）。
     var cfmotoAddress: String?
     var cfmotoProfile: CfmotoProfile?
+    /// 春风 EasyConn：走 `CfMotoEasyConnOutput`（带画面参数面板），而不是上游 `CfmotoOutput`。
+    var cfmotoTuned = false
     var motorcycleProfile: MotorcycleProfile?
     var motorcycleAddress: String?
     var eryaVideoPort: UInt16 = 11111
