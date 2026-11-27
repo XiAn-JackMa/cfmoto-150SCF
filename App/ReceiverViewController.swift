@@ -1881,16 +1881,20 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                                                            fps: live.maxFPS, codec: live.videoCodec,
                                                            iconWidthMM: live.widthPhysicalMM)
                             self.updateVideoAspect()
-                            self.log("按固定画布 \(pinned.width)×\(pinned.height) 启动 CarPlay")
+                            self.log("用固定画布 \(pinned.width)×\(pinned.height) 启动 CarPlay")
                         } else if let canvas = self.receiver.easyConnOutput.negotiatedCanvas {
                             live.width = canvas.width; live.height = canvas.height
                             self.liveDisplay = DisplayPlan(width: canvas.width, height: canvas.height,
                                                            fps: live.maxFPS, codec: live.videoCodec,
                                                            iconWidthMM: live.widthPhysicalMM)
                             self.updateVideoAspect()
-                            self.log("按车机画布 \(canvas.width)×\(canvas.height) 启动 CarPlay（无需缩放）")
+                            if config.width == canvas.width && config.height == canvas.height {
+                                self.log("CarPlay 按车机分辨率 \(canvas.width)×\(canvas.height) 启动，1:1 不缩放")
+                            } else {
+                                self.log("车机要 \(canvas.width)×\(canvas.height)，但 CarPlay 画面是 \(config.width)×\(config.height)，画面会缩放（糊）")
+                            }
                         } else {
-                            self.log("车机尚未报告画布，按上次记录 \(live.width)×\(live.height) 启动")
+                            self.log("车机没报分辨率，按 \(config.width)×\(config.height) 启动 CarPlay")
                         }
                     }
                     self.carPlaySessionStarted = true
@@ -1901,7 +1905,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                     fire()
                 } else {
                     let wait = CfMotoTuning.canvasWaitSeconds
-                    self.log("等待车机报告画布（最多 \(Int(wait)) 秒）后再启动 CarPlay")
+                    self.log("等车机报分辨率（最多 \(Int(wait)) 秒）再启动 CarPlay")
                     let deadline = DispatchWorkItem { fire() }
                     self.carPlayStartDeadline = deadline
                     DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: deadline)
@@ -2305,7 +2309,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             guard autoRestarts < 2 else { return }
             autoRestarts += 1
         }
-        log(CWL("自动重启 CarPlay：{1}", [String(describing: reason)]))
+        log(CWL("正在重启 CarPlay：{1}", [String(describing: reason)]))
         let keepScreen = reportedScreen, keepViewer = primaryViewer, level = lightLevel, count = autoRestarts
         stop()
         statusLabel.text = CWL("正在按新的画面设置重启 CarPlay…")
@@ -2335,8 +2339,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         guard canvasRestartedFor != size else { return }
         canvasRestartedFor = size
         let currentText = liveDisplay.map { "\($0.width)×\($0.height)" } ?? "未知"
-        log("车机画布为 \(size)，当前渲染 \(currentText)，按车机尺寸重启 CarPlay")
-        restartCarPlay(reason: "车机画布 \(size)")
+        log("车机分辨率变了：\(currentText) → \(size)，重启 CarPlay 对齐")
+        restartCarPlay(reason: "车机分辨率变为 \(size)")
     }
 
     /// The car button on the CarPlay home screen: 120 px, a white car on the app's blue.

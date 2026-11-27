@@ -17986,19 +17986,19 @@
         }
       }
     },
-    "自动重启 CarPlay：{1}" : {
+    "正在重启 CarPlay：{1}" : {
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Automatically restarting CarPlay: {1}"
+            "value" : "Restarting CarPlay: {1}"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "自动重启 CarPlay：{1}"
+            "value" : "正在重启 CarPlay：{1}"
           }
         }
       }

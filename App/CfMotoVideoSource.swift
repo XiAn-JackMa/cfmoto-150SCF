@@ -843,15 +843,15 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         let factor = min(scaleX, scaleY)
         let verdict: String
         if abs(scaleX - 1) < 0.01 && abs(scaleY - 1) < 0.01 {
-            verdict = "1:1，不再缩放"
+            verdict = "1:1，不缩放"
         } else if factor > 1.01 {
-            verdict = String(format: "放大 %.2f×（画面会变糊）", factor)
+            verdict = String(format: "放大了 %.2f 倍，画面会糊", factor)
         } else if factor < 0.99 {
-            verdict = String(format: "缩小 %.2f×", factor)
+            verdict = String(format: "缩小到 %.2f 倍，画面会糊", factor)
         } else {
-            verdict = "比例不一致，留黑边"
+            verdict = "宽高比不同，会留黑边"
         }
-        log?("CFMOTO CarPlay 画面 \(width)x\(height) → 画布 \(canvas.width)x\(canvas.height) · \(verdict)")
+        log?("CarPlay 画面 \(width)×\(height)，车机要 \(canvas.width)×\(canvas.height)：\(verdict)")
     }
 
     /// Everything the UI and the periodic diagnostic line need, read under one lock.

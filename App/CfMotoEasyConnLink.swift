@@ -383,8 +383,8 @@ final class CfMotoOutput {
         guard Date().timeIntervalSince(lastDiagnosticAt) >= 10 else { return }
         lastDiagnosticAt = Date()
         let s = lock.withLock { source }.liveStats
-        var text = "[诊断] 车机画面 \(s.canvasSize) ← CarPlay \(s.carPlaySize) · " +
-            (s.scaleText == "1:1" ? "尺寸一致，不缩放" : "缩放 \(s.scaleText)（画面会变糊）") +
+        let scaleNote = s.scaleText == "1:1" ? "1:1，不缩放" : "缩放 \(s.scaleText)，画面会糊"
+        var text = "[诊断] 车机要 \(s.canvasSize)，CarPlay 画面 \(s.carPlaySize)：\(scaleNote)" +
             String(format: " · 每秒送 %.1f 帧 · 重复画面 %.0f%% · 关键帧 %.0f%% · 每帧 %.1f KB · 约 %.1f Mbps",
                    s.servedFPS, s.paddedRatio * 100, s.keyframeRatio * 100, s.averageFrameKB, s.bitrateMbps)
         if CfMotoTuning.staticPadEnabled {
@@ -472,7 +472,10 @@ final class CfMotoOutput {
             if !info.rawJSON.isEmpty { lines.append("[握手] 原始 CLIENT_INFO: \(info.rawJSON)") }
             return lines.joined(separator: "\n")
         case .canvas(let canvas):
-            return "[画布] \(canvas.width)×\(canvas.height)（车机请求 \(canvas.requestedWidth)×\(canvas.requestedHeight)）"
+            if canvas.requestedWidth == canvas.width && canvas.requestedHeight == canvas.height {
+                return "车机申请分辨率 \(canvas.width)×\(canvas.height)"
+            }
+            return "车机申请 \(canvas.requestedWidth)×\(canvas.requestedHeight)，对齐成 \(canvas.width)×\(canvas.height)"
         case .mediaStarted:
             return "[视频] 车机开始拉流"
         case .touch(let touch):
