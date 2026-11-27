@@ -19,10 +19,6 @@ public enum VideoQuality: String, Sendable, Codable, CaseIterable {
     }
 }
 
-public enum ScreenFit: String, Sendable, Codable, CaseIterable {
-    case fill = "FILL", fit = "FIT", stretch = "STRETCH"
-}
-
 public enum PowerMode: String, Sendable, Codable, CaseIterable {
     case auto = "AUTO", smooth = "SMOOTH", balanced = "BALANCED", saver = "SAVER"
     /// Frame cap (fps). AUTO starts at 30 and adapts (AdaptivePolicy).

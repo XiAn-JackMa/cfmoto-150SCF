@@ -115,10 +115,3 @@ public protocol VideoFrameSource: AnyObject, Sendable {
     /// The media sockets closed (the dash will re-open them and send 16/112 again).
     func mediaStopped()
 }
-
-/// Device thermal level (Android PowerManager thermal status names) — input of AdaptivePolicy.
-/// iOS mapping: nominal → none, fair → moderate, serious → severe, critical → critical.
-public enum ThermalLevel: Int, Sendable, Codable, Comparable, CaseIterable {
-    case none = 0, light, moderate, severe, critical, emergency, shutdown
-    public static func < (a: ThermalLevel, b: ThermalLevel) -> Bool { a.rawValue < b.rawValue }
-}
