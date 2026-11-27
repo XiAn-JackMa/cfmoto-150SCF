@@ -359,6 +359,7 @@ final class CfMotoEasyConnOutput {
         }
         logServer.onLog = { [weak self] line in self?.store.append(line) }
         logServer.start()
+        log("日志服务地址：\(logURL)（手机自身的浏览器可用 http://127.0.0.1:\(CfMotoLogServer.defaultPort)/）")
     }
 
     /// 面板上显示的实时日志地址。
