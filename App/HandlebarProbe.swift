@@ -107,7 +107,9 @@ final class HandlebarProbe: @unchecked Sendable {
     func start() {
         guard !isRunning else { return }
         isRunning = true
+        lock.lock()
         screenLocked = !UIApplication.shared.protectedDataIsAvailable
+        lock.unlock()
         observeLockState()
         startVolumeObservation()
         onLog?("[车把] 已启用：锁屏时音量键＝车把按键，目标音量 \(Self.targetVolumePercent)%")
@@ -135,13 +137,15 @@ final class HandlebarProbe: @unchecked Sendable {
         lockObservers = [
             center.addObserver(forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
                                object: nil, queue: .main) { [weak self] _ in
-                self?.screenLocked = true
-                self?.onLog?("[车把] 已锁屏：音量键开始当作车把按键")
+                guard let self else { return }
+                self.lock.lock(); self.screenLocked = true; self.lock.unlock()
+                self.onLog?("[车把] 已锁屏：音量键开始当作车把按键")
             },
             center.addObserver(forName: UIApplication.protectedDataDidBecomeAvailableNotification,
                                object: nil, queue: .main) { [weak self] _ in
-                self?.screenLocked = false
-                self?.onLog?("[车把] 已解锁：音量键恢复正常调音量")
+                guard let self else { return }
+                self.lock.lock(); self.screenLocked = false; self.lock.unlock()
+                self.onLog?("[车把] 已解锁：音量键恢复正常调音量")
             }
         ]
     }
@@ -161,7 +165,8 @@ final class HandlebarProbe: @unchecked Sendable {
             // 回声过滤：new 落在目标音量附近（半格内），就是自己刚拨回的那次，忽略。
             if abs(new - Self.targetVolume) < 0.032 { return }
             // 没锁屏：音量键就是正常调音量，不触发、不拨回。
-            guard self.screenLocked else { return }
+            self.lock.lock(); let locked = self.screenLocked; self.lock.unlock()
+            guard locked else { return }
             let steps = abs(new - old)
             self.record(new > old ? "音量+" : "音量−",
                         String(format: "%.0f%% → %.0f%%（%.3f，约 %d 格）", old * 100, new * 100, steps,
