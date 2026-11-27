@@ -1,0 +1,146 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Builds CarWithin on GitHub's macOS runners and uploads an UNSIGNED .ipa.
+#
+# Signing deliberately stays off this machine: the runner has neither the developer account nor the
+# device, so `CODE_SIGNING_ALLOWED=NO` produces an unsigned bundle and the IPA is signed locally
+# with Sideloadly (or any tool) against the rider's own Apple ID.
+#
+# The CarPlay accessory (MFi) identity never enters the repository. It is stored as two base64
+# secrets, converted on the runner by Tools/convert_diplay_identity.swift, staged into
+# App/BundledIdentity/ and picked up by Tools/generate_project.py as bundle resources, so the app
+# loads it with AccessoryIdentityStore.loadFromBundle() and needs no on-device import step.
+# The app's Documents folder is deliberately not shared (no UIFileSharingEnabled), so bundling is
+# the only path that works without Xcode.
+
+name: build-ipa
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+env:
+  # Secrets, base64 of the two DiPlay/OpenXPlay "offline-mfi" files.
+  MFI_PK8_SECRET: ${{ secrets.MFI_IDENTITY_PK8_B64 }}
+  MFI_P7B_SECRET: ${{ secrets.MFI_CERT_P7B_B64 }}
+
+jobs:
+  build:
+    # macos-15 ships Xcode 16 (iOS 18 SDK), which satisfies the iOS 17 platform requirement.
+    runs-on: macos-15
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          set -eux
+          xcodebuild -version
+          xcodebuild -list -project TDSCarKit.xcodeproj
+
+      - name: Stamp build version
+        run: |
+          set -euo pipefail
+          # Every run gets its own version, so a downloaded IPA can be told apart at a glance.
+          # BASE is the upstream build number this tree is based on (1.0.6 = 18): the update
+          # protocol requires CFBundleVersion to increase monotonically, so a fresh repo's
+          # run_number must never be used raw.
+          BASE=18
+          BUILD=$((BASE + ${{ github.run_number }}))
+          SHORT="1.0.$BUILD"
+          echo "APP_VERSION=$SHORT" >> "$GITHUB_ENV"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $SHORT" App/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" App/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" App/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" App/Info.plist
+
+      - name: Stage MFi identity (committed offline-mfi/ or secrets)
+        run: |
+          set -euo pipefail
+          # A committed offline-mfi/ wins: this fork is a private test build, and keeping the two
+          # files in the tree avoids the secret round-trip entirely.
+          if [ -f offline-mfi/identity.pk8 ] && [ -f offline-mfi/certificate.p7b ]; then
+            echo "using committed offline-mfi/"
+            ls -l offline-mfi
+            exit 0
+          fi
+          if [ -z "${MFI_PK8_SECRET:-}" ] || [ -z "${MFI_P7B_SECRET:-}" ]; then
+            echo "::warning::MFi identity secrets are absent; building without one. CarPlay will ask for an identity."
+            exit 0
+          fi
+          mkdir -p offline-mfi
+          printf '%s' "$MFI_PK8_SECRET" | openssl base64 -d -A > offline-mfi/identity.pk8
+          printf '%s' "$MFI_P7B_SECRET" | openssl base64 -d -A > offline-mfi/certificate.p7b
+          ls -l offline-mfi
+
+      - name: Convert identity and regenerate the project
+        run: |
+          set -euo pipefail
+          if [ -f offline-mfi/identity.pk8 ]; then
+            # DiPlay bundle: PKCS#8 EC P-256 key + PKCS#7 chain -> certificate.p7b, leaf.cer, private.x963
+            swift Tools/convert_diplay_identity.swift offline-mfi App/BundledIdentity
+            ls -l App/BundledIdentity
+          else
+            echo "::warning::no identity staged; regenerating the project without App/BundledIdentity"
+          fi
+          # Always regenerate: Sources/OpenCfMotoCore and the extra App/ files only enter the app
+          # target through this script, so skipping it silently drops them from the build.
+          python3 Tools/generate_project.py
+
+      - name: Build (unsigned)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project TDSCarKit.xcodeproj \
+            -scheme TDSCarKit \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            | tee build.log
+
+      - name: Package unsigned IPA
+        run: |
+          set -euxo pipefail
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          test -n "$APP"
+          mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          rm -rf out/Payload/*.app/_CodeSignature out/Payload/*.app/embedded.mobileprovision || true
+          cd out
+          NAME="CarWithin-${APP_VERSION}-unsigned.ipa"
+          zip -qry "$NAME" Payload
+          echo "IPA_NAME=$NAME" >> "$GITHUB_ENV"
+          ls -lh "$NAME"
+          # Prove what shipped: the version this build reports, and the bundled identity.
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+            "$(find Payload -maxdepth 1 -name '*.app' | head -1)/Info.plist"
+          unzip -l "$NAME" | grep -E 'certificate\.p7b|leaf\.cer|private\.x963' || \
+            echo "::warning::identity files are NOT in the IPA"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: CarWithin-${{ env.APP_VERSION }}-unsigned
+          path: out/${{ env.IPA_NAME }}
+          if-no-files-found: error
+
+      # Build logs are what makes a red run diagnosable without a Mac.
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: warn
+
+      - name: Remove staged identity
+        if: always()
+        run: rm -rf offline-mfi App/BundledIdentity || true
