@@ -1911,6 +1911,16 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                     let deadline = DispatchWorkItem { fire() }
                     self.carPlayStartDeadline = deadline
                     DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: deadline)
+                    // 车机不在线时不等满 wait：探测连续两次无应答就立即启动；
+                    // 车机在线时仍等它报分辨率（画布一到 onCanvas 会提前放行，保证 1:1 不缩放）。
+                    self.receiver.easyConnOutput.onProbeFailed = { [weak self] in
+                        guard let self, self.running, self.localStartupID == startupID else { return }
+                        guard self.pendingCarPlayStart != nil else { return }
+                        self.log("车机不在线（探测未应答），跳过等待直接启动 CarPlay")
+                        self.carPlayStartDeadline?.cancel()
+                        self.carPlayStartDeadline = nil
+                        self.pendingCarPlayStart?()
+                    }
                 }
             }
             prepareExternalOutput(configuration: config)
@@ -2028,6 +2038,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         localStartupID = nil
         pendingCarPlayStart = nil
         carPlayStartDeadline?.cancel(); carPlayStartDeadline = nil
+        receiver.easyConnOutput.onProbeFailed = nil
         carPlaySessionStarted = false
         networkStartupTask?.cancel()
         networkStartupTask = nil

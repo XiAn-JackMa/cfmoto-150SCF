@@ -23,6 +23,10 @@ final class CfMotoOutput {
     /// Raised once when the dash has not connected within `CfMotoTuning.connectTimeoutMinutes`
     /// (only for a real CarPlay session; the test-pattern link never fires it).
     var onGiveUp: (() -> Void)?
+    /// Raised once (per session) when probing has already failed twice, i.e. the dash is not on
+    /// this network. Lets the app skip the "wait for the dash to report its canvas" delay instead
+    /// of burning the full wait on a dash that never answers.
+    var onProbeFailed: (() -> Void)?
     /// The canvas this EasyConn session negotiated; nil until the dash reports one. The deferred
     /// CarPlay start reads it so the first session already renders at the right size.
     var negotiatedCanvas: VideoCanvas? { lock.withLock { sessionCanvas } }
@@ -122,6 +126,12 @@ final class CfMotoOutput {
     private var notConnectedSince: Date?
     /// 自动停止只触发一次。
     private var gaveUp = false
+    /// 车机是否已响应探测（进入等待回连 / 握手 / 投屏任一状态）。
+    private var reachedDash = false
+    /// 最近一次探测尝试序号（`LinkEvent.probing(attempt)`）。
+    private var probeAttempt = 0
+    /// 「探测失败」只回调一次，避免后续每条状态都打断启动。
+    private var probeFailedFired = false
 
     /// One line to both the store (persistent) and whoever shows it (settings screen, :10950).
     private func log(_ line: String) {
@@ -202,6 +212,9 @@ final class CfMotoOutput {
         streaming = false
         notConnectedSince = Date()
         gaveUp = false
+        reachedDash = false
+        probeAttempt = 0
+        probeFailedFired = false
         lock.unlock()
 
         let signer: PureSwiftHuidSigner
@@ -293,13 +306,29 @@ final class CfMotoOutput {
                 }
                 if case .state(let s) = event {
                     self.lock.lock()
+                    switch s {
+                    case .awaitingCallback, .handshaking, .streaming:
+                        self.reachedDash = true
+                    case .probing(let attempt):
+                        self.probeAttempt = attempt
+                    default:
+                        break
+                    }
                     self.streaming = (s == .streaming)
                     if self.streaming {
                         self.notConnectedSince = nil
                     } else if self.notConnectedSince == nil {
                         self.notConnectedSince = Date()
                     }
+                    var fireProbeFailed = false
+                    if !self.reachedDash, !self.probeFailedFired, self.probeAttempt >= 2 {
+                        self.probeFailedFired = true
+                        fireProbeFailed = true
+                    }
                     self.lock.unlock()
+                    if fireProbeFailed {
+                        DispatchQueue.main.async { [weak self] in self?.onProbeFailed?() }
+                    }
                 }
                 if case .canvas(let canvas) = event {
                     // Remembered for planDisplay(): the next session renders CarPlay 1:1 at the

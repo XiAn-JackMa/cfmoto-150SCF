@@ -49,6 +49,8 @@ final class CfMotoEasyConnOutput {
     /// 1.0.83 的链路自己会无限重挂（失联 20 秒后重新发现），不会「连不上就放弃」，
     /// 所以这个回调保留只为兼容 1.0.6 的调用点，实际不会触发。
     var onGiveUp: (() -> Void)?
+    /// 车机不在线（探测连续两次无应答）时回调（主线程）。App 层用它跳过「等车机报分辨率」的等待。
+    var onProbeFailed: (() -> Void)?
 
     init(name: String = "cfmoto-easyconn") {
         engine.onState = { [weak self] state in self?.onState?(state) }
@@ -56,6 +58,7 @@ final class CfMotoEasyConnOutput {
         engine.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?() }
         // 车机在 REQ_RV_CONFIG_CAPTURE(16) 里报分辨率；引擎协商完就在这里回调（主线程）。
         engine.onCanvas = { [weak self] canvas in self?.handleCanvas(canvas) }
+        engine.onProbeFailed = { [weak self] in self?.onProbeFailed?() }
     }
 
     deinit { stop() }
