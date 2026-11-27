@@ -53,6 +53,7 @@ final class CfMotoEasyConnPanel {
     private let staticPadMaxField = CfMotoEasyConnPanel.numberField("0.8", decimal: true)
     private let staticPadQualityField = CfMotoEasyConnPanel.numberField("0.15", decimal: true)
     private let allIntraSwitch = UISwitch()
+    private let connectTimeoutField = CfMotoEasyConnPanel.numberField("5", decimal: false)
 
     /// 日志直显在这里（不做二级页面）。
     private let logView: UITextView = {
@@ -95,7 +96,7 @@ final class CfMotoEasyConnPanel {
     init() {
         for field in [bitrateField, fpsField, keyframeField, canvasWaitField, canvasField,
                       bufferDepthField, idrWaitField, staticIdleField, staticPadSavingField,
-                      staticPadMaxField, staticPadQualityField] {
+                      staticPadMaxField, staticPadQualityField, connectTimeoutField] {
             field.addTarget(self, action: #selector(commitTuning), for: .editingDidEnd)
             field.addTarget(self, action: #selector(commitTuning), for: .editingDidEndOnExit)
         }
@@ -123,6 +124,8 @@ final class CfMotoEasyConnPanel {
                 [
                     addressRow,
                     .field(CWL("EasyConn 端口"), portField, placeholder: "10930"),
+                    .field(CWL("连不上自动停止（分钟，0 关）"), connectTimeoutField, placeholder: "5"),
+                    .note(CWL("从启动开始计时：车机一直没连上（或掉线后一直没恢复）超过这个时间，就自动停止 CarPlay。只对春风 EasyConn 生效。")),
                     .action(scanTitle, icon: scanIcon, detail: { [weak self] in self?.scanText }) { [weak self] in
                         self?.runScan()
                     },
@@ -417,6 +420,9 @@ final class CfMotoEasyConnPanel {
         if let value = number(staticPadMaxField) { CfMotoTuning.staticPadMaxMbps = value }
         if let value = number(staticPadQualityField) { CfMotoTuning.staticPadQuality = value }
         CfMotoTuning.allIntra = allIntraSwitch.isOn
+        if let value = Int((connectTimeoutField.text ?? "").trimmingCharacters(in: .whitespaces)) {
+            CfMotoTuning.connectTimeoutMinutes = value
+        }
         output?.reloadTuning()
         refreshFields()
         onChange?()
@@ -446,6 +452,7 @@ final class CfMotoEasyConnPanel {
         staticPadMaxField.text = trimmed(CfMotoTuning.staticPadMaxMbps, digits: 2)
         staticPadQualityField.text = trimmed(CfMotoTuning.staticPadQuality, digits: 2)
         allIntraSwitch.isOn = CfMotoTuning.allIntra
+        connectTimeoutField.text = "\(CfMotoTuning.connectTimeoutMinutes)"
         portField.text = "\(CfMotoEasyConnOutput.probePort)"
     }
 

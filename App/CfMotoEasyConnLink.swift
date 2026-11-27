@@ -20,6 +20,9 @@ final class CfMotoOutput {
     var onKeyframeRequest: (() -> Void)?
     /// Raised when the dash negotiates a canvas, so CarPlay can render at that exact size.
     var onCanvas: ((VideoCanvas) -> Void)?
+    /// Raised once when the dash has not connected within `CfMotoTuning.connectTimeoutMinutes`
+    /// (only for a real CarPlay session; the test-pattern link never fires it).
+    var onGiveUp: (() -> Void)?
     /// The canvas this EasyConn session negotiated; nil until the dash reports one. The deferred
     /// CarPlay start reads it so the first session already renders at the right size.
     var negotiatedCanvas: VideoCanvas? { lock.withLock { sessionCanvas } }
@@ -113,6 +116,12 @@ final class CfMotoOutput {
     private var lastStats: LinkStats?
     /// Last numbers written to the log, so the ticker does not repeat an unchanged snapshot.
     private var lastStatsSignature = ""
+    /// 车机是否已进入「正在投屏」；连不上自动停止用它判断有没有连上。
+    private var streaming = false
+    /// 本次「没连上」是从什么时候开始的：启动即开始计时，连上（投屏）后清零，掉线时重新开始计时。
+    private var notConnectedSince: Date?
+    /// 自动停止只触发一次。
+    private var gaveUp = false
 
     /// One line to both the store (persistent) and whoever shows it (settings screen, :10950).
     private func log(_ line: String) {
@@ -188,7 +197,12 @@ final class CfMotoOutput {
         lock.unlock()
         previous.shutdown()
         lastState = "未启动"
-        lock.lock(); sessionCanvas = nil; lock.unlock()
+        lock.lock()
+        sessionCanvas = nil
+        streaming = false
+        notConnectedSince = Date()
+        gaveUp = false
+        lock.unlock()
 
         let signer: PureSwiftHuidSigner
         if let existing = self.signer {
@@ -277,6 +291,16 @@ final class CfMotoOutput {
                     self.lock.lock(); self.lastStats = stats; self.lock.unlock()
                     continue
                 }
+                if case .state(let s) = event {
+                    self.lock.lock()
+                    self.streaming = (s == .streaming)
+                    if self.streaming {
+                        self.notConnectedSince = nil
+                    } else if self.notConnectedSince == nil {
+                        self.notConnectedSince = Date()
+                    }
+                    self.lock.unlock()
+                }
                 if case .canvas(let canvas) = event {
                     // Remembered for planDisplay(): the next session renders CarPlay 1:1 at the
                     // canvas instead of letterboxing a 16:9 picture into it.
@@ -301,6 +325,21 @@ final class CfMotoOutput {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard let self, self.lock.withLock({ self.link != nil }) else { return }
+                // 连不上自动停止（只对正式 CarPlay 会话生效；测试图案链路 onGiveUp 为空，不会触发）。
+                self.lock.lock()
+                let timedOut: Bool
+                if self.onGiveUp != nil, !self.testPattern, !self.gaveUp, !self.streaming, let since = self.notConnectedSince {
+                    let timeout = CfMotoTuning.connectTimeoutMinutes
+                    timedOut = timeout > 0 && Date().timeIntervalSince(since) >= Double(timeout * 60)
+                    if timedOut { self.gaveUp = true }
+                } else {
+                    timedOut = false
+                }
+                self.lock.unlock()
+                if timedOut {
+                    self.log("车机 \(CfMotoTuning.connectTimeoutMinutes) 分钟没连上，自动停止 CarPlay")
+                    self.onGiveUp?()
+                }
                 let (state, stats) = self.lock.withLock { (self.lastState, self.lastStats) }
                 if let stats {
                     // The link publishes stats less often than this ticker runs, so an unchanged

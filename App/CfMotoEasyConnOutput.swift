@@ -73,6 +73,7 @@ final class CfMotoEasyConnOutput {
         self.onLog = onLog
         self.onKeyframeRequest = onKeyframeRequest
         self.onGiveUp = onGiveUp
+        engine.onGiveUp = onGiveUp
         // 正式投屏要接管链路：正在等分辨率的那次查询直接作废，别让它把新会话停掉。
         abandonCanvasQuery("已开始正式投屏，分辨率查询取消")
         // 真正的 CarPlay 会话开始前先关掉测试图案，避免把彩条推给车机（1.0.83 同样如此）。

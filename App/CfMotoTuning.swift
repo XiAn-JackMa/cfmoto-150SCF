@@ -145,20 +145,22 @@ enum CfMotoTuning {
         let extras = canvasOverrideSize.map { " · 固定画布 \($0.width)×\($0.height)" } ?? ""
         let pad = staticPadEnabled ? String(format: " · 静止补帧 %.1f Mbps · 上限 %.1f · q %.2f · 门槛 %d%%", staticPadMbps, staticPadMaxMbps, staticPadQuality, staticPadMinSavingPct) : ""
         let intra = allIntra ? " · 全关键帧" : ""
+        let stop = connectTimeoutMinutes > 0 ? " · 连不上停 \(connectTimeoutMinutes) 分钟" : " · 连不上不自动停"
         return String(format: "%.1f Mbps · %d fps · 关键帧 %.1f 秒 · %@ · 等待画布 %.0f 秒",
                       bitrateMbps, frameRate, keyframeSeconds,
                       forceBaseline ? "Baseline 3.1" : "Main profile",
-                      canvasWaitSeconds) + extras + pad + intra
+                      canvasWaitSeconds) + extras + pad + intra + stop
     }
 
     /// Every option on one line, for the log.
     static var fullSummary: String {
         let canvas = canvasOverrideSize.map { "\($0.width)×\($0.height)" } ?? "跟随车机"
         let pad = staticPadEnabled ? String(format: "开（%.1f Mbps · 上限 %.1f Mbps · q %.2f · 门槛 %d%%）", staticPadMbps, staticPadMaxMbps, staticPadQuality, staticPadMinSavingPct) : "关"
-        return String(format: "码率 %.1f Mbps · 帧率 %d · 关键帧 %.1f 秒 · 等待画布 %.0f 秒 · 固定画布 %@ · Baseline %@ · 静止补帧 %@ · 缓存 %d 帧 · 等关键帧 %.1f 秒 · 静止判定 %.2f 秒 · 全关键帧 %@",
+        return String(format: "码率 %.1f Mbps · 帧率 %d · 关键帧 %.1f 秒 · 等待画布 %.0f 秒 · 固定画布 %@ · Baseline %@ · 静止补帧 %@ · 缓存 %d 帧 · 等关键帧 %.1f 秒 · 静止判定 %.2f 秒 · 全关键帧 %@ · 连不上停 %@",
                       bitrateMbps, frameRate, keyframeSeconds, canvasWaitSeconds, canvas,
                       forceBaseline ? "开" : "关", pad, bufferDepth, idrWaitSeconds, staticIdleSeconds,
-                      allIntra ? "开" : "关")
+                      allIntra ? "开" : "关",
+                      connectTimeoutMinutes > 0 ? "\(connectTimeoutMinutes) 分钟" : "关")
     }
 
     static func reset() {
@@ -212,6 +214,15 @@ enum CfMotoTuning {
         set { defaults.set(newValue, forKey: Key.allIntra) }
     }
 
+    // MARK: 连不上自动停止
+
+    /// 车机一直没连上（或掉线后一直没恢复）达到这个分钟数就自动停止 CarPlay；0 = 不自动停止。
+    /// 只对「春风 EasyConn」生效，别的输出不受影响。
+    static var connectTimeoutMinutes: Int {
+        get { Int(clamp(Double(int(for: .connectTimeout, fallback: 5)), 0, 120)) }
+        set { defaults.set(Int(clamp(Double(newValue), 0, 120)), forKey: Key.connectTimeout) }
+    }
+
     // MARK: Internals
 
     private enum Key {
@@ -229,11 +240,13 @@ enum CfMotoTuning {
         static let idrWait = "cfmotoTuningIDRWait"
         static let staticIdle = "cfmotoTuningStaticIdle"
         static let allIntra = "cfmotoTuningAllIntra"
+        static let connectTimeout = "cfmotoTuningConnectTimeout"
         static let all = [bitrate, frameRate, keyframe, baseline, canvasWait, canvasOverride, staticPad,
-                          staticPadMinSaving, staticPadMax, staticPadQuality, bufferDepth, idrWait, staticIdle, allIntra]
+                          staticPadMinSaving, staticPadMax, staticPadQuality, bufferDepth, idrWait, staticIdle, allIntra,
+                          connectTimeout]
     }
 
-    private enum Field { case bitrate, frameRate, keyframe, canvasWait, idrWait, staticIdle, bufferDepth, staticPadMinSaving, staticPadMax, staticPadQuality }
+    private enum Field { case bitrate, frameRate, keyframe, canvasWait, idrWait, staticIdle, bufferDepth, staticPadMinSaving, staticPadMax, staticPadQuality, connectTimeout }
 
     private static func double(for field: Field, fallback: Double) -> Double {
         switch field {
@@ -253,6 +266,7 @@ enum CfMotoTuning {
         case .frameRate: return defaults.object(forKey: Key.frameRate) as? Int ?? fallback
         case .bufferDepth: return defaults.object(forKey: Key.bufferDepth) as? Int ?? fallback
         case .staticPadMinSaving: return defaults.object(forKey: Key.staticPadMinSaving) as? Int ?? fallback
+        case .connectTimeout: return defaults.object(forKey: Key.connectTimeout) as? Int ?? fallback
         default: return fallback
         }
     }

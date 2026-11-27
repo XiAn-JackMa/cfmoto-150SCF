@@ -169,7 +169,7 @@ final class NativeReceiver {
                                               onLog: { [weak self] in self?.onEasyConnLog?($0) },
                                               onKeyframeRequest: { [weak self] in self?.requestKeyFrame(reason: "春风 EasyConn 解码恢复") },
                                               onGiveUp: { [weak self] in
-                                                  self?.queue.async { [weak self] in self?.fail("春风仪表持续连接失败超过 3 分钟，已停止 CarPlay") }
+                                                  self?.queue.async { [weak self] in self?.fail("春风仪表一直没连上车机，已自动停止 CarPlay") }
                                               })
                 } else {
                     let output = profile == .sixInch ? self.cfmoto62 : self.cfmoto5
