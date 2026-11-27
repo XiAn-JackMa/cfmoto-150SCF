@@ -43,6 +43,9 @@ final class CfMotoEasyConnOutput {
     var onState: ((String) -> Void)?
     var onLog: ((String) -> Void)?
     var onKeyframeRequest: (() -> Void)?
+    /// 车机在 REQ_RV_CONFIG_CAPTURE(16) 报完分辨率后回调（主线程）。
+    /// App 层用它「等画布 → 按画布启动 CarPlay」，消除渲染尺寸与编码画布的缩放。
+    var onCanvas: ((VideoCanvas) -> Void)?
     /// 1.0.83 的链路自己会无限重挂（失联 20 秒后重新发现），不会「连不上就放弃」，
     /// 所以这个回调保留只为兼容 1.0.6 的调用点，实际不会触发。
     var onGiveUp: (() -> Void)?
@@ -128,6 +131,10 @@ final class CfMotoEasyConnOutput {
     var liveStats: CfMotoLiveStats { engine.liveStats }
     var logDump: String { engine.logDump }
 
+    /// 当前链路协商出的画布（正式投屏 / 测试图案都算），nil 表示车机还没报。
+    /// `lastCanvas` 兜底：画布一旦报过就留在内存里，等画布启动 CarPlay 时拿得到。
+    var negotiatedCanvas: VideoCanvas? { engine.negotiatedCanvas ?? lastCanvas }
+
     // MARK: - 端口测试
 
     /// 1.0.83 的端口测试：发一次 `0x70000010` 探测（不是只连 TCP），
@@ -197,6 +204,7 @@ final class CfMotoEasyConnOutput {
 
     private func handleCanvas(_ canvas: VideoCanvas) {
         lastCanvas = canvas
+        onCanvas?(canvas)
         guard let query = canvasQuery else { return }
         canvasQuery = nil
         canvasDeadline?.cancel()

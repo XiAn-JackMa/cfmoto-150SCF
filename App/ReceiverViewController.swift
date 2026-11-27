@@ -88,6 +88,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var waitingForNetwork = false
     private var networkRestartCount = 0
     private var localStartupID: UUID?
+    /// EasyConn：等车机报画布后再启动 CarPlay 的挂起动作（1.0.83 的 `pendingCarPlayStart`）。
+    private var pendingCarPlayStart: (() -> Void)?
+    private var carPlayStartDeadline: DispatchWorkItem?
+    /// EasyConn：CarPlay 会话是否已（或即将）启动，用来区分「还没启动的等画布」和「启动后中途改画布」。
+    private var carPlaySessionStarted = false
+    /// EasyConn：本次连接已经按这个画布尺寸重启过一次，避免车机反复报尺寸造成重启循环。
+    private var canvasRestartedFor: String?
     private let aspectRatioControl = ChoiceMenu(items: [CWL("预设比例")] + ReceiverConfiguration.aspectRatios.map(\.title))
     private let resolutionControl = ChoiceMenu(items: ReceiverConfiguration.resolutions.map { "\($0.label)（\($0.width)×\($0.height)）" })
     private let frameRateControl = ChoiceMenu(items: [CWL("自动"), "30 FPS", "60 FPS"])
@@ -758,6 +765,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         receiver.onEasyConnLog = { [weak self] in self?.log($0, mirrorToStore: false) }
         // 1.0.83：10950 日志网页随 App 启动就能访问，不必先进设置页、也不必先启动 CarPlay。
         receiver.easyConnOutput.ensureLogServer()
+        // 等画布启动 CarPlay：画布一到就放行挂起的启动，不必干等完整个「启动等待画布」秒数。
+        // 已经启动之后又报了不同画布，则按新画布重启一次（1.0.83 的 adoptCfMotoCanvas）。
+        receiver.easyConnOutput.onCanvas = { [weak self] canvas in
+            guard let self else { return }
+            self.pendingCarPlayStart?()
+            self.adoptCfMotoCanvas(canvas)
+        }
         startLiveInfoTimer()
         receiver.onControlConnected = { [weak self] in self?.sameDevice.didConnectControl() }
         receiver.onVideo = { [weak self] data, codec in
@@ -1799,7 +1813,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 ssid: ssidField.text ?? "", password: password, wifiChannel: channel, audioEnabled: soundOutput != .phone,
                 videoOutputPort: outputPort, secureVideoOutputPort: httpsPort,
                 deviceID: ReceiverConfiguration.persistentDeviceID())
-            if !restartingAutomatically { autoRestarts = 0; lightLevel = 0; reportedScreen = nil; primaryViewer = nil }
+            if !restartingAutomatically {
+                autoRestarts = 0; lightLevel = 0; reportedScreen = nil; primaryViewer = nil
+                canvasRestartedFor = nil
+            }
             configureDisplay(&config)
             do { try config.validate(requiresWiFiCredentials: requiresWiFiCredentials) } catch {
                     log(CWL("无法启动本机 CarPlay：{1}", [String(describing: error.localizedDescription)]))
@@ -1825,9 +1842,50 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             localStartupID = startupID
             receiver.onListening = { [weak self] port in
                 guard let self, self.running, self.localStartupID == startupID else { return }
-                var live = config; live.port = port
+                self.log("监听器已在端口 \(port) 就绪")
                 self.controlBrowser.start()
-                self.sameDevice.start(configuration: live, identity: identity)
+                // 1.0.83：启动 CarPlay 前先等车机报画布，再按画布 1:1 启动。
+                // 否则按 profile 硬编码的偶数对齐尺寸（如 1024×516）渲染，而编码画布是 16 对齐
+                // （1024×512），每帧都会重采样、文字发软。等画布启动后两者一致，无需缩放。
+                let fire: () -> Void = { [weak self] in
+                    guard let self, self.running, self.localStartupID == startupID else { return }
+                    self.carPlayStartDeadline?.cancel(); self.carPlayStartDeadline = nil
+                    guard self.pendingCarPlayStart != nil else { return }
+                    self.pendingCarPlayStart = nil
+                    var live = config; live.port = port
+                    if self.outputMode == .cfmotoEasyConn {
+                        let pinned = CfMotoTuning.canvasOverrideSize
+                        if let pinned {
+                            live.width = pinned.width; live.height = pinned.height
+                            self.liveDisplay = DisplayPlan(width: pinned.width, height: pinned.height,
+                                                           fps: live.maxFPS, codec: live.videoCodec,
+                                                           iconWidthMM: live.widthPhysicalMM)
+                            self.updateVideoAspect()
+                            self.log("按固定画布 \(pinned.width)×\(pinned.height) 启动 CarPlay")
+                        } else if let canvas = self.receiver.easyConnOutput.negotiatedCanvas {
+                            live.width = canvas.width; live.height = canvas.height
+                            self.liveDisplay = DisplayPlan(width: canvas.width, height: canvas.height,
+                                                           fps: live.maxFPS, codec: live.videoCodec,
+                                                           iconWidthMM: live.widthPhysicalMM)
+                            self.updateVideoAspect()
+                            self.log("按车机画布 \(canvas.width)×\(canvas.height) 启动 CarPlay（无需缩放）")
+                        } else {
+                            self.log("车机尚未报告画布，按上次记录 \(live.width)×\(live.height) 启动")
+                        }
+                    }
+                    self.carPlaySessionStarted = true
+                    self.sameDevice.start(configuration: live, identity: identity)
+                }
+                self.pendingCarPlayStart = fire
+                if self.outputMode != .cfmotoEasyConn || self.receiver.easyConnOutput.negotiatedCanvas != nil {
+                    fire()
+                } else {
+                    let wait = CfMotoTuning.canvasWaitSeconds
+                    self.log("等待车机报告画布（最多 \(Int(wait)) 秒）后再启动 CarPlay")
+                    let deadline = DispatchWorkItem { fire() }
+                    self.carPlayStartDeadline = deadline
+                    DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: deadline)
+                }
             }
             prepareExternalOutput(configuration: config)
             receiver.start(configuration: config, identity: identity, preferredViewer: primaryViewer)
@@ -1942,6 +2000,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             antBMS.setReceiving(false)
         }
         localStartupID = nil
+        pendingCarPlayStart = nil
+        carPlayStartDeadline?.cancel(); carPlayStartDeadline = nil
+        carPlaySessionStarted = false
         networkStartupTask?.cancel()
         networkStartupTask = nil
         waitingForNetwork = false
@@ -2236,6 +2297,26 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self.toggleReceiver()
             self.restartingAutomatically = false
         }
+    }
+
+    /// 车机在 CarPlay 已启动之后又报了不同画布：按新画布重启一次，消除缩放。
+    ///
+    /// `planDisplay()` 只能拿到上一次会话记住的画布，所以首次连新仪表会先按旧尺寸渲染、每帧重采样，
+    /// 这正是「画面发软、竖向有缝」的来源。按协商出的尺寸重启一次，重采样就彻底消失（1.0.83 同名逻辑）。
+    private func adoptCfMotoCanvas(_ canvas: VideoCanvas) {
+        guard running, outputMode == .cfmotoEasyConn else { return }
+        // 等画布的启动还没放行：它自己会采纳画布，这里再重启反而会拆掉一个还没开始的会话。
+        guard carPlaySessionStarted, pendingCarPlayStart == nil else { return }
+        // 固定画布是车手指定的，车机无权改它。
+        guard CfMotoTuning.canvasOverrideSize == nil else { return }
+        let size = "\(canvas.width)x\(canvas.height)"
+        guard liveDisplay?.width != canvas.width || liveDisplay?.height != canvas.height else { return }
+        // 同一尺寸只重启一次，避免车机反复报尺寸造成重启循环。
+        guard canvasRestartedFor != size else { return }
+        canvasRestartedFor = size
+        let currentText = liveDisplay.map { "\($0.width)×\($0.height)" } ?? "未知"
+        log("车机画布为 \(size)，当前渲染 \(currentText)，按车机尺寸重启 CarPlay")
+        restartCarPlay(reason: "车机画布 \(size)")
     }
 
     /// The car button on the CarPlay home screen: 120 px, a white car on the app's blue.
