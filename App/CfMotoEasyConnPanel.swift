@@ -69,8 +69,27 @@ final class CfMotoEasyConnPanel {
         return view
     }()
 
+    /// 设备信息框（软件版本 / iOS 版本 / Wi-Fi 名 / 本机 IP）：和日志框同样式，只读、可复制。
+    private let infoBox: UITextView = {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = false
+        view.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        view.textColor = .label
+        view.backgroundColor = .secondarySystemBackground
+        view.layer.cornerRadius = 10
+        view.clipsToBounds = true
+        view.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        view.heightAnchor.constraint(equalToConstant: 96).isActive = true
+        return view
+    }()
+
     private var probeText = CWL("未测试")
     private var probePassed = false
+    /// 局域网扫描的结果，直接显示在按钮上（按钮标题下方那行说明）。
+    private var scanText = CWL("未扫描")
+    private var scanRunning = false
     private var logTimer: Timer?
 
     init() {
@@ -91,6 +110,7 @@ final class CfMotoEasyConnPanel {
 
     func sections() -> [SettingsSection] {
         refreshFields()
+        refreshInfoBox()
         refreshLogView()
         startLogTimer()
         return [
@@ -98,10 +118,14 @@ final class CfMotoEasyConnPanel {
                 footer: "iPhone 先加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面后再启动 CarPlay。"
                       + "地址留空表示使用本机当前 Wi-Fi 网关。CarPlay 会按车机要求的画布 1:1 渲染（150SCF 为 1024×512），"
                       + "所以上面「画面 › 尺寸/分辨率/宽高比」在本模式下不生效，也不会有黑边。"
+                      + "「端口测试」在车机应答后会顺便问出它的分辨率，直接显示在按钮上。"
                       + "声音走 iPhone 或蓝牙，触控暂不支持。",
                 [
                     addressRow,
                     .field(CWL("EasyConn 端口"), portField, placeholder: "10930"),
+                    .action(scanTitle, icon: scanIcon, detail: { [weak self] in self?.scanText }) { [weak self] in
+                        self?.runScan()
+                    },
                     .action(CWL("端口测试（探测车机）"), icon: ("antenna.radiowaves.left.and.right", .systemGreen),
                             detail: { [weak self] in self?.probeText }) { [weak self] in
                         self?.runProbe()
@@ -109,6 +133,7 @@ final class CfMotoEasyConnPanel {
                     .action(testPatternTitle, icon: testPatternIcon, detail: { [weak self] in self?.testPatternDetail }) { [weak self] in
                         self?.toggleTestPattern()
                     },
+                    .view(infoBox),
                     .view(logView),
                     .action(CWL("浏览器打开实时日志"), icon: ("safari", .systemBlue),
                             detail: { [weak self] in self?.logURLText }) { [weak self] in
@@ -180,6 +205,14 @@ final class CfMotoEasyConnPanel {
         probePassed ? nil : CWL("先通过端口测试")
     }
 
+    private var scanTitle: String {
+        scanRunning ? CWL("扫描局域网设备（扫描中…）") : CWL("扫描局域网设备")
+    }
+
+    private var scanIcon: (String, UIColor) {
+        scanRunning ? ("hourglass", .systemOrange) : ("magnifyingglass", .systemBlue)
+    }
+
     private var logURLText: String {
         output?.logURL ?? CWL("未连接 Wi-Fi")
     }
@@ -194,18 +227,73 @@ final class CfMotoEasyConnPanel {
         onChange?()
     }
 
+    // MARK: - 局域网扫描
+
+    private func runScan() {
+        guard !scanRunning else { return }
+        scanRunning = true
+        let port = CfMotoEasyConnOutput.probePort
+        scanText = CWL("扫描中…（探测 \(port) 端口，约 1–3 秒）")
+        onChange?()
+        output?.log(CWL("开始扫描局域网：本机所在网段，探测 \(port) 端口"))
+        LanPortScanner.scan(port: port) { [weak self] outcome in
+            guard let self else { return }
+            self.scanRunning = false
+            self.applyScan(outcome, port: port)
+            self.onChange?()
+        }
+    }
+
+    /// 扫到的第一台直接填进「车机 IP 地址」，并走 1.0.6 原来的保存路径落盘。
+    private func applyScan(_ outcome: LanPortScanner.Outcome, port: UInt16) {
+        let seconds = String(format: "%.1f", outcome.seconds)
+        if let failure = outcome.failure {
+            scanText = failure
+            output?.log(CWL("扫描未进行：\(failure)"))
+            return
+        }
+        guard !outcome.open.isEmpty else {
+            // 整个网段都「连都连不上」，基本是 iOS 的「本地网络」权限没给，而不是车机没开。
+            if outcome.unreachable >= max(1, outcome.scanned * 9 / 10) {
+                scanText = CWL("整个网段都连不上：检查「设置 › CarWithin › 本地网络」是否允许")
+                output?.log(CWL("扫描 \(outcome.network)：\(outcome.unreachable)/\(outcome.scanned) 台连不上，疑似没有本地网络权限（\(seconds)s）"))
+                return
+            }
+            scanText = CWL("\(outcome.scanned) 台里没有开 \(port) 的设备（\(seconds)s）")
+            output?.log(CWL("扫描 \(outcome.network)：\(outcome.scanned) 台都没有开 \(port) 端口（\(seconds)s）"))
+            return
+        }
+        let chosen = outcome.open[0]
+        addressField?.text = chosen
+        // `saveHeadUnitOutput` 是 1.0.6 自己的保存入口（写 UserDefaults 的 cfmotoAddress）。
+        addressField?.sendActions(for: .editingDidEnd)
+        probeText = CWL("未测试")
+        probePassed = false
+        if outcome.open.count == 1 {
+            scanText = CWL("扫描到 \(chosen)，已填入车机 IP（\(seconds)s）")
+        } else {
+            let all = outcome.open.joined(separator: "、")
+            scanText = CWL("扫描到 \(outcome.open.count) 台（\(all)），已填入 \(chosen)")
+        }
+        output?.log(CWL("扫描 \(outcome.network)：开 \(port) 的设备 \(outcome.open.joined(separator: "、"))，已填入 \(chosen)（\(seconds)s）"))
+    }
+
     private func runProbe() {
         output?.ensureLogServer()
         probeText = CWL("探测中…")
         onChange?()
         let host = (addressField?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        output?.probe(host: host, port: CfMotoEasyConnOutput.probePort) { [weak self] message, ok in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.probeText = message
-                self.probePassed = ok
-                self.onChange?()
-            }
+        // 一步两段：先探测 10930；车机应答之后再拉链路，要它的分辨率。
+        output?.probeThenQueryCanvas(host: host, port: CfMotoEasyConnOutput.probePort,
+                                     progress: { [weak self] step in
+            guard let self else { return }
+            self.probeText = step
+            self.onChange?()
+        }) { [weak self] message, ok in
+            guard let self else { return }
+            self.probeText = message
+            self.probePassed = ok
+            self.onChange?()
         }
     }
 
@@ -233,6 +321,7 @@ final class CfMotoEasyConnPanel {
                 self.logTimer = nil
                 return
             }
+            self.refreshInfoBox()
             self.refreshLogView()
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -246,6 +335,53 @@ final class CfMotoEasyConnPanel {
         let offset = logView.contentOffset
         logView.text = body
         logView.contentOffset = offset
+    }
+
+    // MARK: - 设备信息框
+
+    /// 四行固定内容，跟着日志每秒刷一次：换 Wi-Fi、掉网、切热点能立刻看出来。
+    private func refreshInfoBox() {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let name = info?["CFBundleDisplayName"] as? String
+            ?? info?["CFBundleName"] as? String
+            ?? "CarWithin"
+        let body = [
+            alignedRow("软件版本", "\(name) \(version) (\(build))"),
+            alignedRow("iOS 版本", UIDevice.current.systemVersion),
+            alignedRow("Wi-Fi 名", currentWiFiText),
+            alignedRow("本地 IP", ReceiverConfiguration.wifiIPv4Address() ?? "未连接 Wi-Fi"),
+        ].joined(separator: "\n")
+        guard infoBox.text != body else { return }
+        let offset = infoBox.contentOffset
+        infoBox.text = body
+        infoBox.contentOffset = offset
+    }
+
+    /// Wi-Fi 名写清来源：系统读到的，还是预设里填的（读不到时把原因也写出来）。
+    private var currentWiFiText: String {
+        if let name = SystemWiFiName.current { return "\(name)（系统）" }
+        let preset = WiFiPresetStore.selected()?.ssid ?? "未设置"
+        switch SystemWiFiName.currentStatus {
+        case .locationDenied: return "\(preset)（预设·需定位权限）"
+        case .unavailable: return "\(preset)（预设·系统读取失败）"
+        default: return "\(preset)（预设）"
+        }
+    }
+
+    /// 等宽字体下的对齐：中日韩字符按两格算，标签右侧补空格，让四行的值从同一列开始。
+    private func alignedRow(_ label: String, _ value: String) -> String {
+        var cells = 0
+        for scalar in label.unicodeScalars {
+            let v = scalar.value
+            let wide = (v >= 0x1100 && v <= 0x115F) || (v >= 0x2E80 && v <= 0xA4CF)
+                || (v >= 0xAC00 && v <= 0xD7A3) || (v >= 0xF900 && v <= 0xFAFF)
+                || (v >= 0xFE30 && v <= 0xFE6F) || (v >= 0xFF00 && v <= 0xFF60)
+                || (v >= 0xFFE0 && v <= 0xFFE6)
+            cells += wide ? 2 : 1
+        }
+        return label + String(repeating: " ", count: max(1, 9 - cells)) + value
     }
 
     private func openLogPage() {

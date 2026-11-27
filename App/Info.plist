@@ -43,7 +43,7 @@
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>仅在你选择保存收款码时，将图片添加到相册，不读取相册内容。</string>
 	<key>TDSWiFiNameDetection</key>
-	<string>$(TDS_WIFI_NAME_DETECTION)</string>
+	<string>YES</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

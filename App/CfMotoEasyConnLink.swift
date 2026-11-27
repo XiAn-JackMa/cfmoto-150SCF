@@ -24,6 +24,9 @@ final class CfMotoOutput {
     /// CarPlay start reads it so the first session already renders at the right size.
     var negotiatedCanvas: VideoCanvas? { lock.withLock { sessionCanvas } }
     private var sessionCanvas: VideoCanvas?
+    /// 链路是否正在跑（正式的 CarPlay 会话，或测试图案那条独立链路）。
+    /// 设置页的「分辨率查询」靠它决定要不要自己拉起链路。
+    var isLinkActive: Bool { lock.withLock { link != nil } }
 
     /// Recreated on every start: shutting a source down closes its frame queue, so reusing the
     /// instance after Stop would leave the next session with a queue nothing can push into.
@@ -255,10 +258,13 @@ final class CfMotoOutput {
         }
 
         log("==== EasyConn 目标 \(dash.isEmpty ? "网关" : dash):\(port) · profile=legacy · 测试图案\(testPattern ? "开" : "关") ====")
+        // 每次启动都记一份当下的网络身份：系统 SSID 读得到就用真的，读不到就标明是预设值。
+        let wifiName = SystemWiFiName.current ?? "预设 \(WiFiPresetStore.selected()?.ssid ?? "未设置")"
         log("版本 \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")" +
             " (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))" +
             " · \(UIDevice.current.model) iOS \(UIDevice.current.systemVersion)" +
-            " · 本机IP \(localAddress.isEmpty ? "-" : localAddress)")
+            " · 本机IP \(localAddress.isEmpty ? "-" : localAddress)" +
+            " · Wi-Fi \(wifiName)")
         log("画面参数：\(CfMotoTuning.fullSummary)")
         onState?("正在连接春风车机…")
         log("等待车机在 10930 响应探测…")
