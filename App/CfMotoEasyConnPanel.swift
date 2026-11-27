@@ -281,11 +281,23 @@ final class CfMotoEasyConnPanel {
         output?.log(CWL("扫描 \(outcome.network)：开 \(port) 的设备 \(outcome.open.joined(separator: "、"))，已填入 \(chosen)（\(seconds)s）"))
     }
 
+    /// 地址留空时用本机当前 Wi-Fi 的网关（春风仪表热点固定把仪表放在 .1）。
+    /// 与投屏路径 `NativeReceiver` 里的 fallback 一致，footer 文案也承诺了这一点。
+    private func effectiveHost() -> String {
+        let raw = (addressField?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !raw.isEmpty { return raw }
+        if let local = ReceiverConfiguration.wifiIPv4Address(),
+           let gateway = PxcConnection.gateway(for: local) {
+            return gateway
+        }
+        return ""
+    }
+
     private func runProbe() {
         output?.ensureLogServer()
         probeText = CWL("探测中…")
         onChange?()
-        let host = (addressField?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = effectiveHost()
         // 一步两段：先探测 10930；车机应答之后再拉链路，要它的分辨率。
         output?.probeThenQueryCanvas(host: host, port: CfMotoEasyConnOutput.probePort,
                                      progress: { [weak self] step in
@@ -307,7 +319,7 @@ final class CfMotoEasyConnPanel {
             return
         }
         // 1.0.83 的做法：测试图案自己起一条链路，不依赖 CarPlay 是否在跑。
-        let host = (addressField?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = effectiveHost()
         output?.toggleTestPattern(host: host, port: CfMotoEasyConnOutput.probePort)
         onChange?()
     }
