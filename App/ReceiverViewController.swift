@@ -1048,7 +1048,27 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         if let cfmoto = cfmotoProfile {
             let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
-            // 按偶数对齐：H.264 4:2:0 不接受 515 这样的奇数高度。
+            // EasyConn：渲染 CarPlay 就按车机画布（1.0.83 逻辑）。5 寸 / 6.2 寸是 1.0.6 原生路径，保持原样。
+            if outputMode == .cfmotoEasyConn {
+                // 默认 16 对齐画布（1024×515 → 1024×512），不是编码尺寸（1024×516），
+                // 否则 iPhone 每帧都要把 516 重采样成 512，文字发软、竖向有缝。
+                var width = cfmoto.width & ~15, height = cfmoto.height & ~15
+                // 固定画布优先：车手指定，车机无权改。
+                if let pinned = CfMotoTuning.canvasOverrideSize {
+                    return DisplayPlan(width: pinned.width, height: pinned.height,
+                                       fps: cfmoto.sourceFPS, codec: .h264, iconWidthMM: icon)
+                }
+                // 上次会话记住的车机画布覆盖默认值（1.0.83 的 negotiatedCfMotoCanvas）。
+                if let stored = UserDefaults.standard.string(forKey: "cfmotoCanvas") {
+                    let parts = stored.lowercased().split(separator: "x")
+                    if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]), w >= 320, h >= 320 {
+                        width = w / 2 * 2; height = h / 2 * 2
+                    }
+                }
+                return DisplayPlan(width: width, height: height,
+                                   fps: cfmoto.sourceFPS, codec: .h264, iconWidthMM: icon)
+            }
+            // 5 寸 / 6.2 寸（1.0.6 原生）：按偶数对齐（H.264 4:2:0 不接受奇数高度）。
             return DisplayPlan(width: cfmoto.encodeWidth, height: cfmoto.encodeHeight,
                                fps: cfmoto.sourceFPS, codec: .h264, iconWidthMM: icon)
         }
