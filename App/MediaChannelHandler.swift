@@ -68,7 +68,7 @@ public final class MediaChannelHandler: @unchecked Sendable {
         case MediaCmd.reqConfigCapture:
             return try await onConfigCapture(message, write: write)
         case MediaCmd.reqGetVersion:
-            Log.i("LINK", "[\(tag)] REQ_GET_VERSION → RLY 49")
+            Log.i("LINK", "[\(tag)] REQ_GET_VERSION → 回复 49")
             try await write(MediaReplies.getVersion.encoded())
             return []
         case MediaCmd.reqHeartbeat:
@@ -76,16 +76,16 @@ public final class MediaChannelHandler: @unchecked Sendable {
             return []
         case MediaCmd.reqConfigCaptureExtend:
             let text = String(String(decoding: message.body, as: UTF8.self).prefix(120))
-            Log.i("LINK", "[\(tag)] REQ_CONFIGCAPTUREREXTEND len=\(message.body.count) \(text) → RLY 97")
+            Log.i("LINK", "[\(tag)] REQ_CONFIGCAPTUREREXTEND 长度=\(message.body.count) \(text) → 回复 97")
             try await write(MediaReplies.configCaptureExtend.encoded())
             return []
         case MediaCmd.reqDataStart:
             startMedia(reason: "REQ_RV_DATA_START(112)")
-            Log.i("LINK", "[\(tag)] → RLY 113")
+            Log.i("LINK", "[\(tag)] → 回复 113")
             try await write(MediaReplies.dataStart.encoded())
             return [.mediaStarted]
         case MediaCmd.reqStartH264:
-            Log.i("LINK", "[\(tag)] *** REQ_START_H264 *** len=\(message.body.count) → RLY 129")
+            Log.i("LINK", "[\(tag)] *** REQ_START_H264 *** 长度=\(message.body.count) → 回复 129")
             if resynchronizeOnStartH264 { startMedia(reason: "REQ_START_H264(128)") }
             try await write(MediaReplies.startH264.encoded())
             return resynchronizeOnStartH264 ? [.mediaStarted] : []
@@ -93,13 +93,13 @@ public final class MediaChannelHandler: @unchecked Sendable {
             return try await onDataNext(write: write)
         case MediaCmd.touch:
             guard let touch = PxcTouchFrame.decode(message.body) else {
-                Log.w("LINK", "[\(tag)] touch frame too short (\(message.body.count)b)")
+                Log.w("LINK", "[\(tag)] 触控帧太短（\(message.body.count) 字节）")
                 return [.touchTooShort(message.body.count)]
             }
             touchSink(touch)
             return [.touch(touch)]
         default:
-            Log.i("LINK", "[\(tag)] media cmdType=\(message.cmdType) len=\(message.body.count) token=\(message.token) \(message.body.prefix(32).hexDump(limit: 32))")
+            Log.i("LINK", "[\(tag)] 媒体 cmdType=\(message.cmdType) 长度=\(message.body.count) token=\(message.token) \(message.body.prefix(32).hexDump(limit: 32))")
             return [.unknown(message.cmdType)]
         }
     }
@@ -109,19 +109,19 @@ public final class MediaChannelHandler: @unchecked Sendable {
     private func onConfigCapture(_ message: MediaMessage, write: @Sendable (Data) async throws -> Void) async throws -> [MediaChannelEvent] {
         let req = ConfigCaptureRequest(body: message.body)
         Log.i("LINK", "[\(tag)] \(req.description) token=\(message.token)")
-        Log.i("LINK", "[\(tag)] REQ_CONFIG_CAPTURE extra: \(req.extraFieldsDescription) body=\(message.body.hexDump(limit: 40))")
+        Log.i("LINK", "[\(tag)] REQ_CONFIG_CAPTURE 附加：\(req.extraFieldsDescription) 数据=\(message.body.hexDump(limit: 40))")
         let profile = context.activeProfile
         if req.hasUsableSize {
             let canvas = req.canvas
             context.setCanvas(canvas)
             prepare(canvas, profile: profile)
-            Log.i("LINK", "[\(tag)] → RLY_CONFIG_CAPTURE(17) encoder=\(req.replyEncoder) w=\(canvas.width) h=\(canvas.height)")
+            Log.i("LINK", "[\(tag)] → RLY_CONFIG_CAPTURE(17) 编码器=\(req.replyEncoder) 宽=\(canvas.width) 高=\(canvas.height)")
             try await write(req.reply().encoded())
             return [.canvasNegotiated(canvas)]
         }
         // Guard (not in Android): never reply a 0 dimension — keep the previous canvas.
         let kept = context.canvas
-        Log.e("LINK", "[\(tag)] !! REQ_CONFIG_CAPTURE without a usable size (\(req.deviceWidth)x\(req.deviceHeight)) — keeping \(kept.width)x\(kept.height)")
+        Log.e("LINK", "[\(tag)] !! REQ_CONFIG_CAPTURE 没有可用尺寸（\(req.deviceWidth)x\(req.deviceHeight)）——保留 \(kept.width)x\(kept.height)")
         let reply = ConfigCaptureReply(encoder: req.replyEncoder, width: kept.width, height: kept.height,
                                        supportExtendProtocol: req.supportExtendProtocol)
         prepare(kept, profile: profile)
@@ -140,13 +140,13 @@ public final class MediaChannelHandler: @unchecked Sendable {
     private func startMedia(reason: String) {
         let canvas = context.canvas
         if !context.mediaPrepared {
-            Log.i("LINK", "[\(tag)] \(reason): starting video \(canvas.width)x\(canvas.height)")
+            Log.i("LINK", "[\(tag)] \(reason)：开始视频 \(canvas.width)x\(canvas.height)")
             prepare(canvas, profile: context.activeProfile)
         } else {
-            Log.i("LINK", "[\(tag)] \(reason): video \(canvas.width)x\(canvas.height)")
+            Log.i("LINK", "[\(tag)] \(reason)：视频 \(canvas.width)x\(canvas.height)")
         }
         frameSource.resynchronize()
-        Log.i("LINK", "[VIDEO] bike attached → flushed queue + requested IDR (first frame will be a keyframe)")
+        Log.i("LINK", "[视频] 车机接入 → 已清空队列 + 请求关键帧（第一帧将是关键帧）")
     }
 
     private func onDataNext(write: @Sendable (Data) async throws -> Void) async throws -> [MediaChannelEvent] {
@@ -154,26 +154,26 @@ public final class MediaChannelHandler: @unchecked Sendable {
             // The dash always speaks the control handshake on :10922 before it pulls video; a
             // peer that never did gets no picture of the rider's map (SEC-3).
             Log.shared.throttled("refused-\(tag)", interval: 5, .warn, "LINK",
-                                 "[\(tag)] !! REQ_RV_DATA_NEXT(114) from a peer without a control handshake — no frame served")
+                                 "[\(tag)] !! 一个没做过控制握手的对端发来 REQ_RV_DATA_NEXT(114)——不给画面")
             return [.pullRefused]
         }
         stats.recordPull()
         guard let frame = await frameSource.nextFrame(timeout: framePullTimeout) else {
             stats.recordMissedPull()
-            Log.shared.throttled("no-frame-\(tag)", interval: 1, .warn, "LINK", "[\(tag)] REQ_RV_DATA_NEXT(114): no frame ready")
+            Log.shared.throttled("no-frame-\(tag)", interval: 1, .warn, "LINK", "[\(tag)] REQ_RV_DATA_NEXT(114)：没有就绪的画面")
             return [.pullMissed]
         }
         guard !frame.accessUnit.isEmpty else {
             // Never send a zero-size frame (media-video.md §15.2).
             stats.recordMissedPull()
-            Log.w("LINK", "[\(tag)] REQ_RV_DATA_NEXT(114): source returned an empty access unit — not sent")
+            Log.w("LINK", "[\(tag)] REQ_RV_DATA_NEXT(114)：画面源返回空帧——不发")
             return [.pullMissed]
         }
         let bytes = frame.wireBytes
         try await write(bytes) // ONE write: [size i32 LE][Annex-B AU]
         let n = stats.recordFrameSent(wireBytes: bytes.count, keyframe: frame.isKeyframe)
         if n <= 5 || n % 60 == 0 {
-            Log.i("LINK", "[\(tag)] sent frame #\(n) (\(frame.accessUnit.count)b\(frame.isKeyframe ? ", key" : ""))")
+            Log.i("LINK", "[\(tag)] 已发帧 #\(n)（\(frame.accessUnit.count) 字节\(frame.isKeyframe ? "，关键帧" : "")）")
         }
         return [.frameSent(number: n, bytes: bytes.count, keyframe: frame.isKeyframe)]
     }

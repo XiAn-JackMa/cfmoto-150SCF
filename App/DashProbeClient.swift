@@ -97,16 +97,16 @@ struct DashProbeClient: Sendable {
     /// One probe attempt (Android `probeTarget` body): connect, send the fixed frame, read one
     /// frame, close the socket in all cases.
     func probeOnce(host: String, port: UInt16, attempt: Int) async -> Outcome {
-        Log.i("LINK", "[PROBE] connect #\(attempt) -> \(host):\(port)")
+        Log.i("LINK", "[探测] 第 \(attempt) 次连接 \(host):\(port)")
         let stream: any ByteStream
         do {
             stream = try await network.connect(host: host, port: port, timeout: connectTimeout)
         } catch {
             if DashProbeClient.isLocalNetworkDenied(error) {
-                Log.e("LINK", "[PROBE] !! the system dropped the connection (Local Network access off for OpenCfMoto, or a VPN / Wi-Fi data restriction / filter)")
+                Log.e("LINK", "[探测] !! 系统丢弃了连接（本地网络权限没开，或 VPN / 数据限制 / 过滤器）")
                 return .localNetworkDenied
             }
-            Log.i("LINK", "[PROBE] failed: \(error)")
+            Log.i("LINK", "[探测] 失败：\(error)")
             return .failed("\(error)")
         }
         guard track(stream) else {
@@ -118,27 +118,27 @@ struct DashProbeClient: Sendable {
             untrack(stream)
         }
         do {
-            Log.i("LINK", "[PROBE] -> MDNS_RESPOND (0x70000010) \(PxcProbe.payloadJSON)")
+            Log.i("LINK", "[探测] → 发探测帧 MDNS_RESPOND (0x70000010) \(PxcProbe.payloadJSON)")
             try await stream.write(PxcProbe.frameBytes)
             let reply = try await LinkIO.withDeadline(readTimeout, closing: stream) {
                 try await PxcFrame.read(from: stream)
             }
             let body = reply.payloadText
-            Log.i("LINK", "[PROBE] <- cmd=\(reply.cmdHex) \(body)")
+            Log.i("LINK", "[探测] ← 收到 cmd=\(reply.cmdHex) \(body)")
             if PxcProbe.isAccepted(reply) {
-                Log.i("LINK", "[PROBE] *** accepted — bike should now connect back to our ports ***")
+                Log.i("LINK", "[探测] *** 已通过——车机现在应该回连我们的端口 ***")
                 return .accepted
             }
-            Log.w("LINK", "[PROBE] !! not accepted: \(body)")
+            Log.w("LINK", "[探测] !! 车机没接受：\(body)")
             return .rejected(body)
         } catch TransportError.closed {
-            Log.i("LINK", "[PROBE] bike closed before responding")
+            Log.i("LINK", "[探测] 车机还没应答就关了连接")
             return .noReply
         } catch TransportError.timeout {
-            Log.i("LINK", "[PROBE] connected, but no reply within \(readTimeout)s")
+            Log.i("LINK", "[探测] 连上了，但 \(readTimeout) 秒内没收到应答")
             return .unanswered
         } catch {
-            Log.i("LINK", "[PROBE] failed: \(error)")
+            Log.i("LINK", "[探测] 失败：\(error)")
             return .failed("\(error)")
         }
     }
@@ -162,13 +162,13 @@ struct DashProbeClient: Sendable {
     /// Sequential connect scan (Android `scanOpenPorts`), result ordered with 10930 first.
     func scanOpenPorts(host: String, ports: ClosedRange<UInt16>, timeout: TimeInterval,
                        shouldContinue: @Sendable () -> Bool) async -> [UInt16] {
-        Log.i("LINK", "[DISC] port-scanning \(host) \(ports.lowerBound)–\(ports.upperBound)…")
+        Log.i("LINK", "[扫描] 正在扫 \(host) 的 \(ports.lowerBound)–\(ports.upperBound) 端口…")
         var open: [UInt16] = []
         for port in ports {
             guard shouldContinue() else { break }
             if await isPortOpen(host: host, port: port, timeout: timeout) { open.append(port) }
         }
-        Log.i("LINK", open.isEmpty ? "[DISC] port-scan: none open" : "[DISC] port-scan open: \(open)")
+        Log.i("LINK", open.isEmpty ? "[扫描] 没扫到开着的端口" : "[扫描] 开着的端口：\(open)")
         return open.sorted { a, b in (a == PxcProbe.port ? 0 : 1, a) < (b == PxcProbe.port ? 0 : 1, b) }
     }
 }

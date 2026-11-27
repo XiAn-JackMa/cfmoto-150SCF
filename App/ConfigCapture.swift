@@ -100,8 +100,8 @@ public struct ConfigCaptureRequest: Sendable, Equatable, CustomStringConvertible
 
     /// Android log line `REQ_CONFIG_CAPTURE w=… h=… fps=… wantEncoder=… ext=… len=…`.
     public var description: String {
-        "REQ_CONFIG_CAPTURE w=\(deviceWidth) h=\(deviceHeight) fps=\(wantFps) wantEncoder=\(wantEncoder) " +
-            "ext=\(Int8(bitPattern: supportExtendProtocol)) len=\(bodyLength)"
+        "REQ_CONFIG_CAPTURE 宽=\(deviceWidth) 高=\(deviceHeight) 帧率=\(wantFps) 期望编码器=\(wantEncoder) " +
+            "扩展=\(Int8(bitPattern: supportExtendProtocol)) 长度=\(bodyLength)"
     }
 
     /// The fields Android ignores (for research logs).
@@ -110,7 +110,7 @@ public struct ConfigCaptureRequest: Sendable, Equatable, CustomStringConvertible
         return "codec=\(s(supportCodec)) minQ=\(s(minQuality)) maxQ=\(s(maxQuality)) bitRate=\(s(bitRate)) " +
             "capScreenMode=\(s(capScreenMode)) touchMode=\(s(touchMode)) orientation=\(s(orientation)) " +
             "displayId=\(s(displayId)) videoType=\(s(videoType)) reserved=\(s(reserved)) " +
-            "encryptedHUID=\(encryptedHUID.map { "\($0.count) chars" } ?? "-")"
+            "encryptedHUID=\(encryptedHUID.map { "\($0.count) 字符" } ?? "-")"
     }
 }
 

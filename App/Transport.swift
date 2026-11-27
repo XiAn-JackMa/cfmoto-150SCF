@@ -15,10 +15,10 @@ public enum TransportError: Error, Equatable, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .closed: return "connection closed"
-        case .timeout: return "timed out"
-        case .cancelled: return "cancelled"
-        case let .failed(m): return "transport failure: \(m)"
+        case .closed: return "连接已关闭"
+        case .timeout: return "超时"
+        case .cancelled: return "已取消"
+        case let .failed(m): return "传输失败：\(m)"
         }
     }
 }
@@ -72,7 +72,7 @@ public enum PlatformTransportErrors {
     public static let connectionRefusedPrefix = "ECONNREFUSED"
 
     public static func addressInUse(port: UInt16) -> TransportError {
-        .failed("\(addressInUsePrefix): address already in use (port \(port))")
+        .failed("\(addressInUsePrefix)：端口已被占用（端口 \(port)）")
     }
 
     public static var localNetworkDeniedError: TransportError { .failed(localNetworkDenied) }

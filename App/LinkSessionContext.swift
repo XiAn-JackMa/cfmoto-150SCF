@@ -97,10 +97,10 @@ public final class LinkSessionContext: @unchecked Sendable {
         lock.unlock()
         let profile = BikeProfiles.refine(early: early, selected: selected)
         if profile != selected, let panel = early.panelSize {
-            Log.i("LINK", "[\(tag)] keeping landscape QR/measured profile '\(early.name)' (CLIENT_INFO preferred '\(selected.name)' but panel \(panel.width)x\(panel.height) is wide)")
+            Log.i("LINK", "[\(tag)] 保留横屏二维码/实测车型 '\(early.name)'（CLIENT_INFO 倾向 '\(selected.name)'，但面板 \(panel.width)x\(panel.height) 是宽屏）")
         }
         if early != profile {
-            Log.i("LINK", "[\(tag)] profile refined from QR guess '\(early.name)' → CLIENT_INFO '\(profile.name)'")
+            Log.i("LINK", "[\(tag)] 车型从二维码猜测 '\(early.name)' 修正为 CLIENT_INFO '\(profile.name)'")
         }
         let dash = info.dashInfo(profile: profile.id)
         lock.lock()
@@ -108,7 +108,7 @@ public final class LinkSessionContext: @unchecked Sendable {
         _clientInfo = info
         _dashInfo = dash
         lock.unlock()
-        Log.i("LINK", "[\(tag)] *** BikeProfile selected: \(profile.name) ***")
+        Log.i("LINK", "[\(tag)] *** 已选车型：\(profile.name) ***")
         let reply = PhoneClientInfoReply.build(phone: phone, publicKeyBase64: signer.publicKeyBase64,
                                                encryptedHUID: encryptedHUID(for: info.huid),
                                                supportFunction: profile.supportFunction,
@@ -133,7 +133,7 @@ public final class LinkSessionContext: @unchecked Sendable {
         do {
             sig = try signer.encryptedHUID(huid)
         } catch {
-            Log.e("LINK", "[:10922] !! encryptedHUID failed (\(huid.utf8.count)-byte HUID): \(error) — replying with \"\"")
+            Log.e("LINK", "[:10922] !! 加密 HUID 失败（\(huid.utf8.count) 字节）：\(error)——回复空串")
             return ""
         }
         lock.lock(); signatureCache[huid] = sig; lock.unlock()

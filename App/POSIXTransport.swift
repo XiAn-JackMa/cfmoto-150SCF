@@ -131,13 +131,44 @@ public enum POSIXErrno {
         }
     }
 
-    /// strerror text, e.g. "Connection refused".
+    /// strerror 的中文说明，例如「连接被拒绝（端口没有服务）」。
     public static func text(_ code: Int32) -> String {
-        strerror(code).map { String(cString: $0) } ?? "error \(code)"
+        switch code {
+        case ECONNREFUSED: return "连接被拒绝（端口没有服务）"
+        case ETIMEDOUT: return "连接超时"
+        case EHOSTUNREACH: return "主机不可达"
+        case ENETUNREACH: return "网络不可达"
+        case EHOSTDOWN: return "主机已关机"
+        case ENETDOWN: return "网络已断开"
+        case EADDRINUSE: return "端口已被占用"
+        case EADDRNOTAVAIL: return "地址不可用"
+        case ECONNRESET: return "连接被重置"
+        case ECONNABORTED: return "连接被中止"
+        case ENETRESET: return "网络被重置"
+        case EPIPE: return "管道已断开"
+        case ENOTCONN: return "尚未连接"
+        case ESHUTDOWN: return "连接已关闭"
+        case EINPROGRESS: return "连接进行中"
+        case EALREADY: return "已在连接中"
+        case EAGAIN: return "资源暂时不可用"
+        case EINTR: return "被信号打断"
+        case EPERM: return "权限不足"
+        case EACCES: return "访问被拒绝"
+        case EBADF: return "文件描述符无效"
+        case EINVAL: return "参数无效"
+        case EMFILE: return "文件描述符用尽"
+        case ENFILE: return "系统文件表已满"
+        case ENOBUFS: return "缓冲区不足"
+        case ENOMEM: return "内存不足"
+        case EAFNOSUPPORT: return "不支持的地址族"
+        case EPROTO: return "协议错误"
+        case EOPNOTSUPP: return "操作不支持"
+        default: return strerror(code).map { String(cString: $0) } ?? "错误 \(code)"
+        }
     }
 
-    /// "ECONNREFUSED (Connection refused)".
-    public static func describe(_ code: Int32) -> String { "\(name(code)) (\(text(code)))" }
+    /// "ECONNREFUSED（连接被拒绝（端口没有服务））"。
+    public static func describe(_ code: Int32) -> String { "\(name(code))（\(text(code))）" }
 }
 
 private func setNonBlockingCloExec(_ fd: Int32) {
@@ -316,7 +347,7 @@ final class POSIXPollReactor: @unchecked Sendable {
             let e = errno
             wakeRead = -1
             wakeWrite = -1
-            Log.e("NET", "poll reactor: pipe() failed: \(POSIXErrno.describe(e)) — polling every 20 ms")
+            Log.e("NET", "poll 反应器：pipe() 失败：\(POSIXErrno.describe(e))——改每 20 毫秒轮询一次")
         }
         let thread = Thread { [unowned self] in self.run() }
         thread.name = "ocm.posix.poll"
@@ -453,7 +484,7 @@ final class POSIXPollReactor: @unchecked Sendable {
                 let e = errno
                 if e != EINTR {
                     // EINVAL / ENOMEM: never expected; back off instead of spinning.
-                    Log.shared.throttled("posix.poll", interval: 10, .error, "NET", "poll failed: \(POSIXErrno.describe(e))")
+                    Log.shared.throttled("posix.poll", interval: 10, .error, "NET", "poll 失败：\(POSIXErrno.describe(e))")
                     usleep(20_000)
                 }
                 continue
@@ -629,7 +660,7 @@ func posixStreamError(_ code: Int32, _ operation: String) -> TransportError {
     switch code {
     case ECONNRESET, EPIPE, ENOTCONN, ESHUTDOWN, ECONNABORTED, ENETRESET, EBADF: return .closed
     case ETIMEDOUT: return .timeout
-    default: return .failed("\(POSIXErrno.name(code)): \(operation) failed (\(POSIXErrno.text(code)))")
+    default: return .failed("\(POSIXErrno.name(code))：\(operation) 失败（\(POSIXErrno.text(code))）")
     }
 }
 
@@ -820,13 +851,13 @@ public final class POSIXStreamListener: StreamListener, @unchecked Sendable {
                 // repeats mean a dead blocking listener: fail so the link listens again. (A non-blocking
                 // defunct listener answers EAGAIN instead, never ECONNABORTED: the SO_ERROR check finds it.)
                 aborted += 1
-                if aborted >= 32 { throw TransportError.failed("accept :\(port) failed: \(POSIXErrno.describe(e)), repeatedly") }
+                if aborted >= 32 { throw TransportError.failed("accept :\(port) 失败：\(POSIXErrno.describe(e))，且反复出现") }
             case EMFILE, ENFILE, ENOBUFS, ENOMEM:
                 // Out of descriptors / memory: keep the listener, retry shortly (no spinning).
                 do { try await Task.sleep(nanoseconds: 100_000_000) } catch { throw TransportError.cancelled }
             default:
                 if socket.isClosed { throw TransportError.closed }
-                throw TransportError.failed("accept :\(port) failed: \(POSIXErrno.describe(e))")
+                throw TransportError.failed("accept :\(port) 失败：\(POSIXErrno.describe(e))")
             }
         }
     }
@@ -843,8 +874,8 @@ public final class POSIXStreamListener: StreamListener, @unchecked Sendable {
         if socket.isClosed { throw TransportError.closed }
         guard err != 0 else { return }
         let what = POSIXErrno.describe(err)
-        Log.w("NET", "listener :\(port) reclaimed by the system (SO_ERROR \(what), e.g. while the app was suspended) — failing its accept so the link listens again")
-        throw TransportError.failed("accept :\(port) failed: listener reclaimed (\(what))")
+        Log.w("NET", "监听端口 :\(port) 被系统收回（SO_ERROR \(what)，比如 App 被挂起时）——让 accept 失败以便重新监听")
+        throw TransportError.failed("accept :\(port) 失败：监听被系统收回（\(what)）")
     }
 }
 
@@ -914,11 +945,11 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
         /// IP_BOUND_IF index (nil = connect unbound).
         let index: UInt32?
 
-        /// " via en0#9 (192.168.0.51)" / " unbound (loopback destination)" — for log lines.
+        /// "，经 en0#9（192.168.0.51）" / "（回环地址）"——用于日志行。
         var label: String {
             guard let a = choice.interface else { return " \(choice)" }
-            if let index { return " via \(a.name)#\(index) (\(a.ipv4))" }
-            return " via \(a.name) (\(a.ipv4), routing table)"
+            if let index { return "，经 \(a.name)#\(index)（\(a.ipv4)）" }
+            return "，经 \(a.name)（\(a.ipv4)，走路由表）"
         }
     }
 
@@ -964,7 +995,7 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
         setIntOption(fd, SOL_SOCKET, SO_REUSEADDR, 1)
         guard var addr = posixIPv4Address(host: host, port: port) else {
             sock.close()
-            throw TransportError.failed("listen :\(port) failed: bad bind address \(host)")
+            throw TransportError.failed("监听 :\(port) 失败：绑定地址无效 \(host)")
         }
         let (bound, bindErr) = try sock.syscall { fd in
             withUnsafePointer(to: &addr) {
@@ -983,7 +1014,7 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
         counters.withLock { $0.listens += 1 }
         // Port 0 (tests): report the port the kernel picked.
         let boundPort = port == 0 ? sock.localEndpoint().port : port
-        Log.d("NET", "listening on \(host):\(boundPort)")
+        Log.d("NET", "正在监听 \(host):\(boundPort)")
         let tr = trace
         let ctr = counters
         return POSIXStreamListener(
@@ -994,15 +1025,15 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
                     $0.accepted += 1
                     $0.acceptedByPort[s.localPort, default: 0] += 1
                 }
-                Log.d("NET", "[:\(s.localPort)] accepted \(s.remoteEndpoint) (local \(s.localHost ?? "?"))")
+                Log.d("NET", "[:\(s.localPort)] 接受了 \(s.remoteEndpoint)（本机 \(s.localHost ?? "?")）")
             },
-            onStreamClose: { s in tr?("[net] :\(s.localPort) closed \(s.remoteEndpoint) (local)") })
+            onStreamClose: { s in tr?("[net] :\(s.localPort) 已关闭 \(s.remoteEndpoint)（本地）") })
     }
 
     private func listenFailure(_ port: UInt16, _ step: String, _ code: Int32) -> TransportError {
-        Log.w("NET", "listen :\(port) failed: \(step): \(POSIXErrno.describe(code))")
+        Log.w("NET", "监听 :\(port) 失败：\(step)：\(POSIXErrno.describe(code))")
         if code == EADDRINUSE { return PlatformTransportErrors.addressInUse(port: port) }
-        return .failed("listen :\(port) failed: \(step): \(POSIXErrno.describe(code))")
+        return .failed("监听 :\(port) 失败：\(step)：\(POSIXErrno.describe(code))")
     }
 
     // MARK: Connect
@@ -1016,10 +1047,10 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
     /// denial is retried until then (see the file header).
     public func openStream(host: String, port: UInt16, timeout: TimeInterval) async throws -> POSIXByteStream {
         counters.withLock { $0.connectAttempts += 1 }
-        guard port != 0 else { throw TransportError.failed("invalid port 0") }
+        guard port != 0 else { throw TransportError.failed("端口 0 无效") }
         guard let addr = posixIPv4Address(host: host, port: port) else {
-            Log.d("NET", "connect \(host):\(port) failed: cannot resolve \(host) (IPv4)")
-            throw TransportError.failed("cannot resolve \(host) (IPv4)")
+            Log.d("NET", "连接 \(host):\(port) 失败：无法解析 \(host)（IPv4）")
+            throw TransportError.failed("无法解析 \(host)（IPv4）")
         }
         let target = "\(host):\(port)"
         let started = monotonicNanos()
@@ -1033,9 +1064,9 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
             } catch let error as TransportError {
                 if error == .timeout {
                     counters.withLock { $0.connectTimeouts += 1 }
-                    Log.d("NET", "connect \(target)\(route.label) timed out after \(millis(since: started)) ms (no answer)")
+                    Log.d("NET", "连接 \(target)\(route.label) 超时（\(millis(since: started)) 毫秒无应答）")
                 } else {
-                    Log.d("NET", "connect \(target)\(route.label) \(error) after \(millis(since: started)) ms")
+                    Log.d("NET", "连接 \(target)\(route.label) \(error)（用时 \(millis(since: started)) 毫秒）")
                 }
                 throw error
             }
@@ -1043,11 +1074,11 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
             case let .connected(sock):
                 counters.withLock { $0.connectsOK += 1 }
                 let local = sock.localEndpoint()
-                Log.d("NET", "connect \(target)\(route.label): connected in \(millis(since: started)) ms from \(local.host ?? "?"):\(local.port)")
+                Log.d("NET", "连接 \(target)\(route.label)：\(millis(since: started)) 毫秒内连上，本机 \(local.host ?? "?"):\(local.port)")
                 let tr = trace
                 return POSIXByteStream(socket: sock, remoteHost: host, remotePort: port, localPort: local.port,
                                        localHost: local.host,
-                                       onClose: { s in tr?("[net] outbound \(s.remoteEndpoint) closed (local)") })
+                                       onClose: { s in tr?("[net] 出站 \(s.remoteEndpoint) 已关闭（本地）") })
             case let .failed(code, synchronous):
                 let error = Self.connectError(code, synchronous: synchronous, towardsLocalSubnet: route.choice.interface != nil,
                                               detectLocalNetworkDenial: options.detectLocalNetworkDenial, target: target)
@@ -1056,12 +1087,12 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
                         if code == ECONNREFUSED { $0.connectRefused += 1 }
                         if error == .timeout { $0.connectTimeouts += 1 }
                     }
-                    Log.d("NET", "connect \(target)\(route.label) failed: \(POSIXErrno.describe(code))\(synchronous ? "" : " (SO_ERROR)") after \(millis(since: started)) ms")
+                    Log.d("NET", "连接 \(target)\(route.label) 失败：\(POSIXErrno.describe(code))\(synchronous ? "" : "（SO_ERROR）")（用时 \(millis(since: started)) 毫秒）")
                     throw error
                 }
                 denials += 1
                 if denials == 1 {
-                    Log.w("NET", "connect \(target)\(route.label): EHOSTUNREACH straight from connect() = dropped by a system policy, normally Local Network privacy (else a VPN or per-app data rule); retrying until the \(String(format: "%.1f", timeout)) s deadline")
+                    Log.w("NET", "连接 \(target)\(route.label)：connect() 直接返回 EHOSTUNREACH = 被系统策略丢弃，通常是本地网络权限（或 VPN/数据规则）；一直重试到 \(String(format: "%.1f", timeout)) 秒")
                 }
                 let pause = nanos(options.localNetworkRetryInterval)
                 if monotonicNanos() + pause < deadline {
@@ -1069,7 +1100,7 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
                     continue
                 }
                 counters.withLock { $0.connectDenied += 1 }
-                Log.w("NET", "connect \(target)\(route.label): EHOSTUNREACH on all \(denials) attempt(s) in \(millis(since: started)) ms — dropped by the system (Local Network access off, or a VPN / data rule / filter)")
+                Log.w("NET", "连接 \(target)\(route.label)：\(denials) 次全是 EHOSTUNREACH（\(millis(since: started)) 毫秒）——被系统丢弃（本地网络权限没开，或 VPN/数据规则/过滤器）")
                 throw error
             }
         }
@@ -1084,8 +1115,8 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
         }
         switch code {
         case ETIMEDOUT: return .timeout
-        case ECONNREFUSED: return .failed("\(PlatformTransportErrors.connectionRefusedPrefix): connection refused (\(target))")
-        default: return .failed("\(POSIXErrno.name(code)): \(POSIXErrno.text(code)) (\(target))")
+        case ECONNREFUSED: return .failed("\(PlatformTransportErrors.connectionRefusedPrefix)：连接被拒绝（\(target)）")
+        default: return .failed("\(POSIXErrno.name(code))：\(POSIXErrno.text(code))（\(target)）")
         }
     }
 
@@ -1099,7 +1130,7 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
         let fd = sysSocket()
         guard fd >= 0 else {
             let e = errno
-            throw TransportError.failed("\(POSIXErrno.name(e)): socket failed (\(POSIXErrno.text(e)))")
+            throw TransportError.failed("\(POSIXErrno.name(e))：socket 失败（\(POSIXErrno.text(e))）")
         }
         configureStreamSocket(fd, noDelay: options.noDelay)
         let sock = POSIXSocket(fd: fd)
@@ -1107,7 +1138,7 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
             let e = POSIXInterfaceBinding.bind(fd, toInterface: index)
             if e != 0 {
                 Log.shared.throttled("posix.boundif.\(index).\(e)", interval: 30, .warn, "NET",
-                                     "IP_BOUND_IF \(route.choice) #\(index) failed: \(POSIXErrno.describe(e)) — connecting unbound")
+                                     "IP_BOUND_IF \(route.choice) #\(index) 失败：\(POSIXErrno.describe(e))——改为不绑定网卡连接")
             }
         }
         let rc: Int32
@@ -1165,13 +1196,13 @@ public final class POSIXNetworkProvider: NetworkProvider, @unchecked Sendable {
         if changed {
             switch choice {
             case let .subnet(a) where index != nil:
-                Log.i("NET", "route to \(ip): \(choice) — socket bound to \(a.name) (index \(index ?? 0), IP_BOUND_IF)")
+                Log.i("NET", "路由到 \(ip)：\(choice)——socket 绑定到 \(a.name)（索引 \(index ?? 0)，IP_BOUND_IF）")
             case let .subnet(a):
                 let why = !POSIXInterfaceBinding.isSupported ? "no IP_BOUND_IF here"
                     : !options.bindToInterface ? "binding off" : "no index for \(a.name)"
-                Log.i("NET", "route to \(ip): \(choice) — not bound (\(why), routing table)")
+                Log.i("NET", "路由到 \(ip)：\(choice)——未绑定（\(why)，走路由表）")
             default:
-                Log.i("NET", "route to \(ip): \(choice)")
+                Log.i("NET", "路由到 \(ip)：\(choice)")
             }
         }
         return route

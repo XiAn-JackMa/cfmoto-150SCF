@@ -244,7 +244,7 @@ final class LinkSession: @unchecked Sendable {
     private func setStateLocked(_ s: LinkState) {
         guard alive, state != s else { return }
         state = s
-        pendingLogs.append("[state] \(s)")
+        pendingLogs.append("[状态] \(s)")
         owner?.sessionStateChanged(s, generation: generation)
     }
 
@@ -263,8 +263,8 @@ final class LinkSession: @unchecked Sendable {
     private func run() async {
         setState(.startingServers)
         let addresses = options.interfaceProvider()
-        Log.i("LINK", "---- environment ----")
-        Log.i("LINK", "interfaces: \(addresses.map(\.description).joined(separator: ", "))")
+        Log.i("LINK", "---- 环境信息 ----")
+        Log.i("LINK", "网卡：\(addresses.map(\.description).joined(separator: "，"))")
         Log.i("LINK", "---------------------")
         // 1. Addresses: phone IPv4 on the bike Wi-Fi and the ordered dash candidates.
         let local: InterfaceAddress?
@@ -278,7 +278,7 @@ final class LinkSession: @unchecked Sendable {
         let candidates = InterfaceAddresses.gatewayCandidates(dashHost: config.dashHost, injectedGateway: injectedGateway,
                                                               local: local)
         guard local != nil || config.dashHost != nil || injectedGateway != nil, let primary = candidates.first else {
-            Log.e("LINK", "could not resolve our IPv4 on the bike network; aborting")
+            Log.e("LINK", "在车机网络里找不到本机 IPv4，放弃")
             withLock { setStateLocked(.failed(.noWifiAddress)) }
             return
         }
@@ -287,7 +287,7 @@ final class LinkSession: @unchecked Sendable {
             allowedPeers.formUnion(candidates.compactMap(LinkPeerHost.normalize))
         }
         let fallbacks = candidates.count > 1 ? " (fallbacks \(candidates.dropFirst().joined(separator: ", ")))" : ""
-        Log.i("LINK", "our IP=\(local?.ipv4 ?? "?")  bike IP=\(primary)\(fallbacks)")
+        Log.i("LINK", "本机 IP=\(local?.ipv4 ?? "?")  车机 IP=\(primary)\(fallbacks)")
 
         // 2. Listen on all three ports BEFORE probing.
         for port in LinkSession.listenPorts {
@@ -302,8 +302,8 @@ final class LinkSession: @unchecked Sendable {
                     return
                 }
             } catch {
-                Log.e("LINK", "bind :\(port) failed: \(error)")
-                Log.e("LINK", "!! link ports are held by another app (usually the official CFMoto/EasyConnect app). Close it (swipe it away) and reconnect — OpenCfMoto needs ports [10922, 10921, 10920].")
+                Log.e("LINK", "监听 :\(port) 失败：\(error)")
+                Log.e("LINK", "!! 端口被别的 App 占用（通常是官方春风/EasyConnect）。把它从后台划掉再重连——EasyConn 需要 [10922, 10921, 10920] 端口。")
                 let (opened, ts): ([any StreamListener], [Task<Void, Never>]) = withLock {
                     setStateLocked(.failed(.portInUse(port)))
                     alive = false
@@ -319,7 +319,7 @@ final class LinkSession: @unchecked Sendable {
             }
         }
         let ls = withLock { listeners }
-        Log.i("LINK", "listening on \(local?.ipv4 ?? "*") ports [10922, 10921, 10920] (\(ls.count) open)")
+        Log.i("LINK", "已在 \(local?.ipv4 ?? "*") 监听 [10922, 10921, 10920]（\(ls.count) 个就绪）")
         for port in LinkSession.listenPorts {
             guard let l = ls[port] else { continue }
             spawn { [self] in await self.acceptLoop(port: port, listener: l) }
@@ -344,7 +344,7 @@ final class LinkSession: @unchecked Sendable {
                 // A listener dying mid-session (iOS reclaims the sockets of a suspended app) would make
                 // every reconnect fail silently: listen again. The dead one still holds the port (a new
                 // bind would get EADDRINUSE): close and forget it first (review POSIX-1).
-                Log.e("LINK", "[:\(port)] accept ended: \(error)")
+                Log.e("LINK", "[:\(port)] 接收连接结束：\(error)")
                 let dead = listener
                 dead.close()
                 withLock {
@@ -366,7 +366,7 @@ final class LinkSession: @unchecked Sendable {
                     return rejectedPeers
                 }
                 if n <= 5 || n % 50 == 0 {
-                    Log.w("LINK", "[:\(port)] !! refused a connection from \(host ?? "an unknown address") — not the dash this session probed (#\(n))")
+                    Log.w("LINK", "[:\(port)] !! 拒绝了一个来自 \(host ?? "未知地址") 的连接——不是本次探测到的车机（#\(n)）")
                 }
             case .dead:
                 stream.close()
@@ -385,7 +385,7 @@ final class LinkSession: @unchecked Sendable {
             do {
                 fresh = try await network.listen(port: port)
             } catch {
-                Log.e("LINK", "[:\(port)] listening again failed (try \(attempts)/5): \(error)")
+                Log.e("LINK", "[:\(port)] 重新监听失败（第 \(attempts)/5 次）：\(error)")
                 continue
             }
             let ok: Bool = withLock {
@@ -396,10 +396,10 @@ final class LinkSession: @unchecked Sendable {
                 fresh.close()
                 return nil
             }
-            Log.i("LINK", "[:\(port)] listening again")
+            Log.i("LINK", "[:\(port)] 已重新监听")
             return fresh
         }
-        Log.e("LINK", "[:\(port)] !! cannot listen on this port any more — the dash cannot call back on it until the link restarts (Stop, then Connect)")
+        Log.e("LINK", "[:\(port)] !! 这个端口再也监听不了——重启链路前（先停止再连接）车机无法回连")
         return nil
     }
 
@@ -434,7 +434,7 @@ final class LinkSession: @unchecked Sendable {
             }
             return .accepted(c)
         }
-        if case .accepted = result { Log.i("LINK", "[:\(stream.localPort)] <<< bike connected from \(stream.remoteEndpoint)") }
+        if case .accepted = result { Log.i("LINK", "[:\(stream.localPort)] <<< 车机从 \(stream.remoteEndpoint) 连入") }
         return result
     }
 
@@ -491,20 +491,20 @@ final class LinkSession: @unchecked Sendable {
     /// handler (write) error → log and keep reading.
     private func serveControl(_ conn: Connection) async {
         let tag = ":\(conn.port)"
-        Log.i("LINK", "[\(tag)] framing=CmdBaseHead (PXC control)")
+        Log.i("LINK", "[\(tag)] 帧格式=CmdBaseHead（PXC 控制通道）")
         let handler = ControlChannelHandler(context: context, tag: tag)
         while isOpen(conn) {
             let frame: PxcFrame
             do {
                 frame = try await PxcFrame.read(from: conn.stream)
             } catch let e as PxcFrameError {
-                Log.e("LINK", "[\(tag)] frame error: \(e)")
+                Log.e("LINK", "[\(tag)] 帧错误：\(e)")
                 return
             } catch TransportError.closed {
-                Log.i("LINK", "[\(tag)] bike closed")
+                Log.i("LINK", "[\(tag)] 车机关闭了通道")
                 return
             } catch {
-                Log.i("LINK", "[\(tag)] read error: \(error)")
+                Log.i("LINK", "[\(tag)] 读取错误：\(error)")
                 return
             }
             let response = handler.handle(frame)
@@ -528,7 +528,7 @@ final class LinkSession: @unchecked Sendable {
                 do {
                     try await conn.writeLock.write(reply.encoded(), to: conn.stream)
                 } catch {
-                    Log.w("LINK", "[\(tag)] handler error: \(error)")
+                    Log.w("LINK", "[\(tag)] 处理错误：\(error)")
                     break
                 }
             }
@@ -538,7 +538,7 @@ final class LinkSession: @unchecked Sendable {
     /// :10921 / :10920 read loop (Android `mediaLoop`, port-agnostic).
     private func serveMedia(_ conn: Connection) async {
         let tag = ":\(conn.port)"
-        Log.i("LINK", "[\(tag)] framing=ReqBase (media plane) profile=\(context.activeProfile.name)")
+        Log.i("LINK", "[\(tag)] 帧格式=ReqBase（媒体通道） 车型=\(context.activeProfile.name)")
         let peer = conn.peer
         let handler = MediaChannelHandler(context: context, frameSource: frameSource, stats: stats,
                                           framePullTimeout: config.framePullTimeout, tag: tag,
@@ -553,7 +553,7 @@ final class LinkSession: @unchecked Sendable {
             do {
                 message = try await MediaMessage.read(from: stream)
             } catch TransportError.closed {
-                Log.i("LINK", "[\(tag)] media closed")
+                Log.i("LINK", "[\(tag)] 媒体通道关闭")
                 return
             } catch {
                 Log.i("LINK", "[\(tag)] \(error)")
@@ -563,7 +563,7 @@ final class LinkSession: @unchecked Sendable {
             do {
                 events = try await handler.handle(message) { data in try await stream.write(data) }
             } catch {
-                Log.w("LINK", "[\(tag)] write error: \(error)")
+                Log.w("LINK", "[\(tag)] 写入错误：\(error)")
                 return
             }
             for event in events {
@@ -610,7 +610,7 @@ final class LinkSession: @unchecked Sendable {
         let interval = timings.heartbeatInterval
         let beat = PxcFrame(cmd: PxcCmd.heartbeat).encoded()
         let task = Task { [weak self] in
-            Log.i("LINK", "[hb] PXC \(label) heartbeat started (0x70000000 every \(Int(interval * 1000))ms)")
+            Log.i("LINK", "[心跳] PXC \(label) 心跳已开始（每 \(Int(interval * 1000)) 毫秒发一次 0x70000000）")
             var beats = 0
             while true {
                 guard await LinkIO.sleep(interval) else { return }
@@ -618,11 +618,11 @@ final class LinkSession: @unchecked Sendable {
                 do {
                     try await conn.writeLock.write(beat, to: conn.stream)
                 } catch {
-                    Log.w("LINK", "[hb] PXC \(label) heartbeat send failed: \(error)")
+                    Log.w("LINK", "[心跳] PXC \(label) 心跳发送失败：\(error)")
                     return
                 }
                 beats += 1
-                if beats <= 3 || beats % 15 == 0 { Log.i("LINK", "[hb] → PXC \(label) heartbeat #\(beats)") }
+                if beats <= 3 || beats % 15 == 0 { Log.i("LINK", "[心跳] → PXC \(label) 心跳 #\(beats)") }
             }
         }
         let kept: Bool = withLock {
@@ -677,11 +677,11 @@ final class LinkSession: @unchecked Sendable {
         case let .logNotFound(summary):
             // What actually happened (review LOG-1), e.g. "Bonjour: listed 192.168.0.1:10930 · probes:
             // 192.168.0.1:10930 timed out ×11 · port scan 10915–10935: none open".
-            Log.e("LINK", "!! Wi-Fi is up but EasyConn never answered (\(summary)). Keep the pairing QR open on the dash.")
+            Log.e("LINK", "!! Wi-Fi 正常，但 EasyConn 一直没应答（\(summary)）。请让车机停在配对二维码界面。")
         case let .logDenied(summary):
-            Log.e("LINK", "!! the system dropped every connection to the dash (EHOSTUNREACH straight from connect()): Local Network access is probably off for OpenCfMoto, else a VPN / Wi-Fi data restriction / filter (\(summary))")
+            Log.e("LINK", "!! 系统丢弃了所有连车机的请求（connect() 直接返回 EHOSTUNREACH）：多半是 OpenCfMoto 的「本地网络」权限没开，也可能是 VPN / Wi-Fi 数据限制 / 过滤器（\(summary)）")
         case let .logBlocked(summary):
-            Log.e("LINK", "!! the system dropped every connection to the dash (EHOSTUNREACH straight from connect()) although Local Network access works (Bonjour answered / a probe connected): a VPN without local-network access, a Wi-Fi data restriction for OpenCfMoto or a content filter (\(summary))")
+            Log.e("LINK", "!! 系统丢弃了所有连车机的请求（EHOSTUNREACH），但本地网络权限是通的（Bonjour 有应答 / 探测能连上）：是 VPN 没开本地网络、Wi-Fi 数据限制或内容过滤器（\(summary)）")
         case .none:
             break
         }
@@ -754,21 +754,21 @@ final class LinkSession: @unchecked Sendable {
     private func bonjourPath(_ discovery: DashDiscovery, gate: ProbeGate, denied: Locked<Bool>) async -> Bool {
         for round in 0 ..< 2 {
             guard canProbe, await !gate.accepted else { return false }
-            Log.i("LINK", "[DISC] discovering _EasyConn._tcp.…")
+            Log.i("LINK", "[发现] 正在搜 _EasyConn._tcp.…")
             let found = await discovery.discover(timeout: timings.bonjourBrowseTimeout)
             noteBonjourResults(found, tallied: true)
             guard let endpoint = found.first else {
-                Log.i("LINK", "[DISC] NSD timed out / no usable EasyConn advertisement")
+                Log.i("LINK", "[发现] NSD 超时 / 没有可用的 EasyConn 广播")
                 return false
             }
             let pkg = endpoint.txt["packagename"] ?? endpoint.txt["packageName"] ?? endpoint.txt["package"]
-            Log.i("LINK", "[DISC] NSD → \(endpoint.host):\(endpoint.port)\(pkg.map { " pkg=\($0)" } ?? "")")
+            Log.i("LINK", "[发现] NSD → \(endpoint.host):\(endpoint.port)\(pkg.map { " 包名=\($0)" } ?? "")")
             if await probe(host: endpoint.host, port: endpoint.port, attempts: timings.bonjourProbeAttempts,
                            gate: gate, denied: denied) {
                 return true
             }
             if denied.current { return false }
-            if round == 0 { Log.i("LINK", "[DISC] NSD endpoint did not accept probe — re-discovering…") }
+            if round == 0 { Log.i("LINK", "[发现] NSD 找到的地址没通过探测——重新搜…") }
         }
         return false
     }
@@ -865,7 +865,7 @@ final class LinkSession: @unchecked Sendable {
         guard await LinkIO.sleep(config.connectBackTimeout) else { return }
         let retry = withLock { alive && !everConnected && connections.isEmpty && !reprobing && !discovering }
         guard retry else { return }
-        Log.w("LINK", "[PROBE] !! the dash accepted the probe but did not connect back within \(config.connectBackTimeout)s — re-probing")
+        Log.w("LINK", "[探测] !! 车机答应了探测，但 \(config.connectBackTimeout) 秒内没回连——重新探测")
         await runDiscovery()
     }
 
@@ -886,7 +886,7 @@ final class LinkSession: @unchecked Sendable {
         }
         switch next {
         case .gaveUp:
-            Log.e("LINK", "[reconnect] gave up after \(config.maxReconnectAttempts) attempts — tap Connect to retry")
+            Log.e("LINK", "[重连] 已重试 \(config.maxReconnectAttempts) 次仍未连上——点「连接」再试")
         case .loop:
             if !spawn({ [self] in await self.reconnectLoop() }) { withLock { reprobing = false } }
         case .none:
@@ -905,7 +905,7 @@ final class LinkSession: @unchecked Sendable {
             }
             guard let step else { break }
             let backoff = timings.reconnectBackoff(attempt: step.n)
-            Log.i("LINK", "[reconnect] link lost — re-probing (attempt \(step.n)/\(max)) in \(Int(backoff * 1000))ms")
+            Log.i("LINK", "[重连] 连接断开——\(Int(backoff * 1000)) 毫秒后重新探测（第 \(step.n)/\(max) 次）")
             guard await LinkIO.sleep(backoff), canProbe else { break }
             stats.resetConnectionFrameCount() // the first frame after reconnect re-signals STREAMING
             withLock {
@@ -920,17 +920,17 @@ final class LinkSession: @unchecked Sendable {
                                        gate: gate, denied: denied, reconnecting: true)
             }
             if !accepted, canProbe, !denied.current, let discovery {
-                Log.i("LINK", "[DISC] discovering _EasyConn._tcp.…")
+                Log.i("LINK", "[发现] 正在搜 _EasyConn._tcp.…")
                 let found = await discovery.discover(timeout: timings.bonjourBrowseTimeout)
                 noteBonjourResults(found, tallied: false)
                 if let endpoint = found.first {
-                    Log.i("LINK", "[DISC] NSD → \(endpoint.host):\(endpoint.port)")
+                    Log.i("LINK", "[发现] NSD → \(endpoint.host):\(endpoint.port)")
                     accepted = await probe(host: endpoint.host, port: endpoint.port, attempts: timings.reconnectProbeAttempts,
                                            gate: gate, denied: denied, reconnecting: true)
                 }
             }
             if accepted {
-                Log.i("LINK", "[reconnect] probe accepted — waiting \(Int(timings.reconnectSettle * 1000))ms for the dash")
+                Log.i("LINK", "[重连] 探测通过——等 \(Int(timings.reconnectSettle * 1000)) 毫秒让车机回连")
             }
             // Give the dash a moment to connect back before deciding to try again.
             guard await LinkIO.sleep(timings.reconnectSettle) else { break }
@@ -941,13 +941,13 @@ final class LinkSession: @unchecked Sendable {
             failLocked(.lostLink) // iOS: ERROR as soon as the budget is spent (Android waits for another close)
             return true
         }
-        if exhausted { Log.e("LINK", "[reconnect] gave up after \(max) attempts — tap Connect to retry") }
+        if exhausted { Log.e("LINK", "[重连] 已重试 \(max) 次仍未连上——点「连接」再试") }
     }
 
     /// Drops every live bike socket; the reconnect loop runs when the last one closes.
     func forceReconnect(reason: String) {
         let cs = withLock { Array(connections.values) }
-        Log.w("LINK", "[watchdog] forcing reconnect (\(reason)) — dropping \(cs.count) live socket(s)")
+        Log.w("LINK", "[看门狗] 强制重连（\(reason)）——断开 \(cs.count) 条现有连接")
         cs.forEach { $0.stream.close() }
     }
 
@@ -992,19 +992,19 @@ final class LinkSession: @unchecked Sendable {
                 }
                 return (state, listeners.count, probeAccepted, mediaActive, stall, noFirstFrame, rearm, firstUnansweredPullAt)
             }
-            Log.i("LINK", "hb#\(tick) probed=\(check.probed) video=\(check.media) framesSent=\(stats.framesSinceLastReset) openServers=\(check.open) state=\(check.state) pulls/s=\(String(format: "%.1f", snap.pullRate))")
+            Log.i("LINK", "心跳#\(tick) 已探测=\(check.probed) 视频=\(check.media) 已发帧=\(stats.framesSinceLastReset) 监听端口=\(check.open) 状态=\(check.state) 每秒拉流=\(String(format: "%.1f", snap.pullRate))")
             if check.stall {
                 let ms = snap.lastFrameAt.map { Int((now - $0) * 1000) } ?? -1
-                Log.w("LINK", "[watchdog] streaming stalled (\(ms)ms, no frames) — recovering")
+                Log.w("LINK", "[看门狗] 投屏卡住了（\(ms) 毫秒没新帧）——正在恢复")
                 forceReconnect(reason: "stall")
             }
             if check.noFirstFrame {
                 let ms = check.unansweredSince.map { Int((now - $0) * 1000) } ?? -1
-                Log.w("LINK", "[watchdog] media open but no first frame (\(ms)ms since an unanswered 114) — recovering")
+                Log.w("LINK", "[看门狗] 媒体通道开着但一直没来第一帧（\(ms) 毫秒）——正在恢复")
                 forceReconnect(reason: "no first frame")
             }
             if check.rearm {
-                Log.i("LINK", "[watchdog] re-arming reconnect after error")
+                Log.i("LINK", "[看门狗] 出错后重新武装重连")
                 rearmFromError()
             }
         }

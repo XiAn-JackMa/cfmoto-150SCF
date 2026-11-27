@@ -133,11 +133,11 @@ public final class EasyConnLink: @unchecked Sendable {
         session = s
         lock.unlock()
         if let old {
-            Log.i("LINK", "already running — forcing PXC restart for clean mode switch")
+            Log.i("LINK", "已在运行——强制重启 PXC 以切换模式")
             old.shutdown()
         }
         let qrDesc = configuration.qr.map { "QR ssid=\($0.ssid) modelId=\($0.modelId ?? "-")" } ?? "no QR"
-        Log.i("LINK", "→ bike profile (\(qrDesc)): \(initial.name)")
+        Log.i("LINK", "→ 车型（\(qrDesc)）：\(initial.name)")
         s.begin()
     }
 
@@ -154,7 +154,7 @@ public final class EasyConnLink: @unchecked Sendable {
         lock.unlock()
         if let s {
             s.shutdown()
-            Log.i("LINK", "stopped")
+            Log.i("LINK", "已停止")
         }
     }
 

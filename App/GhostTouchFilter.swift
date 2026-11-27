@@ -130,7 +130,7 @@ public final class GhostTouchFilter: @unchecked Sendable {
     /// Feeds one raw touch (2 = DOWN, 3 = MOVE, 1 = UP; others are dropped).
     public func handle(rawAction: UInt16, x: Int, y: Int, pointerId id: Int) {
         guard let action = PxcTouchFrame.normalize(rawAction) else {
-            Log.w("LINK", "[\(tag)] touch: unknown action=\(rawAction) x=\(x) y=\(y)")
+            Log.w("LINK", "[\(tag)] 触控：未知动作=\(rawAction) x=\(x) y=\(y)")
             return
         }
         if action == .move {

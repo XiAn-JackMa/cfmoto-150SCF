@@ -115,12 +115,12 @@ public enum LinkFailure: Error, Sendable, Equatable, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case let .portInUse(p): return "port \(p) is in use — close the official CFMoto / Carbit app"
-        case .localNetworkDenied: return "Local Network access denied"
-        case .localNetworkBlocked: return "connection to the dash blocked by the system (VPN, data restriction or filter)"
-        case .noWifiAddress: return "not connected to the bike Wi-Fi"
-        case .dashNotFound: return "dash not found on this Wi-Fi"
-        case .lostLink: return "lost bike link"
+        case let .portInUse(p): return "端口 \(p) 被占用——请先关闭官方春风 / Carbit App"
+        case .localNetworkDenied: return "本地网络权限被拒"
+        case .localNetworkBlocked: return "连车机被系统拦截（VPN、数据限制或过滤器）"
+        case .noWifiAddress: return "没连上车机 Wi-Fi"
+        case .dashNotFound: return "这个 Wi-Fi 上没找到车机"
+        case .lostLink: return "与车机的连接断开"
         case let .other(m): return m
         }
     }
@@ -147,16 +147,16 @@ public enum LinkState: Sendable, Equatable, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .idle: return "idle"
-        case .startingServers: return "starting servers"
-        case let .probing(a): return "probing (\(a))"
-        case .awaitingCallback: return "waiting for dash"
-        case .handshaking: return "handshaking"
-        case .awaitingMedia: return "waiting for video request"
-        case .streaming: return "streaming"
-        case let .reconnecting(a): return "reconnecting (\(a))"
-        case let .failed(f): return "failed: \(f)"
-        case .stopped: return "stopped"
+        case .idle: return "空闲"
+        case .startingServers: return "正在监听端口"
+        case let .probing(a): return "探测车机（第 \(a) 次）"
+        case .awaitingCallback: return "等待车机回连"
+        case .handshaking: return "握手中"
+        case .awaitingMedia: return "等待车机拉流"
+        case .streaming: return "正在投屏"
+        case let .reconnecting(a): return "重连中（第 \(a) 次）"
+        case let .failed(f): return "失败：\(f)"
+        case .stopped: return "已停止"
         }
     }
 

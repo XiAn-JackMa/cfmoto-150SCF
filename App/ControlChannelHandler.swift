@@ -81,7 +81,7 @@ public final class ControlChannelHandler: @unchecked Sendable {
         case PxcCmd.clientInfo:
             return onClientInfo(frame)
         case PxcCmd.querySpeed:
-            Log.i("LINK", "[\(tag)] QUERY_SPEED \(Self.loggable(frame)) → reply 0x10691")
+            Log.i("LINK", "[\(tag)] QUERY_SPEED \(Self.loggable(frame)) → 回复 0x10691")
             return ControlChannelResponse(replies: [PxcFrame(cmd: PxcCmd.querySpeedReply)])
         case PxcCmd.checkSn:
             return onCheckSn(frame)
@@ -92,9 +92,9 @@ public final class ControlChannelHandler: @unchecked Sendable {
         case PxcCmd.huTimeSync:
             return onTimeSync(frame)
         case PxcCmd.huQueryTime:
-            Log.i("LINK", "[CLOCK-LAB] HU_QUERY_TIME len=\(frame.payload.count) → 0x10451 empty")
+            Log.i("LINK", "[CLOCK-LAB] HU_QUERY_TIME 长度=\(frame.payload.count) → 0x10451 空应答")
             let channel = context.clientInfo?.channel.trimmingCharacters(in: .whitespaces) ?? ""
-            Log.i("LINK", "[\(tag)] HU_QUERY_TIME (0x10450) len=\(frame.payload.count) channel=\(channel.isEmpty ? "-" : channel) → 0x10451 empty")
+            Log.i("LINK", "[\(tag)] HU_QUERY_TIME (0x10450) 长度=\(frame.payload.count) 通道=\(channel.isEmpty ? "-" : channel) → 0x10451 空应答")
             return ControlChannelResponse(replies: [HuQueryTime.replyFrame()])
         default:
             return ackUnknown(frame)
@@ -107,32 +107,32 @@ public final class ControlChannelHandler: @unchecked Sendable {
         if _channel == nil { _channel = ch }
         lock.unlock()
         let hex = ch == .carCtrl ? "0x10000" : "0x20000"
-        Log.i("LINK", "[\(tag)] bike selected \(ch.rawValue) (\(hex)) → ack \(PxcCmd.hex(ack))")
+        Log.i("LINK", "[\(tag)] 车机选择 \(ch.rawValue)（\(hex)）→ 确认 \(PxcCmd.hex(ack))")
         return ControlChannelResponse(replies: [PxcFrame(cmd: ack)], events: [.channelSelected(ch, startHeartbeat: first)])
     }
 
     private func onClientInfo(_ frame: PxcFrame) -> ControlChannelResponse {
         guard frame.payload.count <= Self.maxJSONPayloadBytes else {
-            Log.e("LINK", "[\(tag)] !! CLIENT_INFO of \(frame.payload.count) bytes \u{2014} too large to be real, NOT parsed / NOT replying")
+            Log.e("LINK", "[\(tag)] !! CLIENT_INFO 有 \(frame.payload.count) 字节\u{2014}太大不像真的，不解析/不回复")
             return ControlChannelResponse(events: [.clientInfoUnparsable(Self.loggable(frame))])
         }
         let text = frame.payloadText
-        Log.i("LINK", "[\(tag)] *** CLIENT_INFO from bike *** \(text)")
+        Log.i("LINK", "[\(tag)] *** 收到车机 CLIENT_INFO *** \(text)")
         guard let info = BikeClientInfo.parse(text) else {
-            Log.e("LINK", "[\(tag)] !! CLIENT_INFO parse failed — NOT replying (Android parity); the dash will likely stall. len=\(frame.payload.count) hex=\(frame.payload.prefix(48).hexString)")
+            Log.e("LINK", "[\(tag)] !! CLIENT_INFO 解析失败——不回复（与 Android 一致）；车机可能会卡住。长度=\(frame.payload.count) hex=\(frame.payload.prefix(48).hexString)")
             return ControlChannelResponse(events: [.clientInfoUnparsable(text)])
         }
         // Masked here: the bare-serial redaction rule only matches alphanumeric HUIDs (review SEC-5).
-        Log.i("LINK", "[\(tag)] carHuid=\(info.huid.map(LogRedactor.maskTail) ?? "null") HUName=\(info.huName) channel=\(info.channel)")
-        Log.i("LINK", "[\(tag)] bike touch=\(info.supportsScreenTouch) supportHID=\(info.optBoolean("supportHID")) supportMirrorOverlayTouch=\(info.optBoolean("supportMirrorOverlayTouch")) socketTimeoutPeriodWifi=\(info.socketTimeoutSeconds.map(String.init) ?? "-")")
+        Log.i("LINK", "[\(tag)] carHuid=\(info.huid.map(LogRedactor.maskTail) ?? "null") 车机名=\(info.huName) 通道=\(info.channel)")
+        Log.i("LINK", "[\(tag)] 车机触控=\(info.supportsScreenTouch) 支持HID=\(info.optBoolean("supportHID")) 支持镜像覆盖触控=\(info.optBoolean("supportMirrorOverlayTouch")) Wi-Fi套接字超时=\(info.socketTimeoutSeconds.map(String.init) ?? "-")")
         let (profile, reply, dash) = context.applyClientInfo(info, tag: tag)
         let replyFrame = PhoneClientInfoReply.frame(reply)
-        Log.i("LINK", "[\(tag)] → CLIENT_INFO reply \(String(reply.jsonString.prefix(180)))…")
+        Log.i("LINK", "[\(tag)] → CLIENT_INFO 回复 \(String(reply.jsonString.prefix(180)))…")
         return ControlChannelResponse(replies: [replyFrame], events: [.dashIdentified(dash, profile)])
     }
 
     private func onCheckSn(_ frame: PxcFrame) -> ControlChannelResponse {
-        Log.i("LINK", "[\(tag)] CHECK_SN from bike: \(Self.loggable(frame))")
+        Log.i("LINK", "[\(tag)] 车机发来 CHECK_SN：\(Self.loggable(frame))")
         // An oversized payload is answered like an unparsable one (empty id), without parsing it.
         let serial = frame.payload.count <= Self.maxJSONPayloadBytes ? CheckSn.serial(from: frame.payload) : ""
         let result = CheckSn.result(serial: serial)
@@ -148,8 +148,8 @@ public final class ControlChannelHandler: @unchecked Sendable {
         let ack = context.timeSyncAck(for: frame)
         let note = context.noteTimeSync()
         if note.log {
-            Log.i("LINK", "[CLOCK-LAB] HU_TIME_SYNC → \(context.timeSyncForcePhone ? "phone" : "echo")")
-            Log.i("LINK", "[\(tag)] HU_TIME_SYNC #\(note.count) len=\(frame.payload.count) → ack 0x10601 mode=\(ack.mode.rawValue) time=\(ack.stamp)")
+            Log.i("LINK", "[CLOCK-LAB] HU_TIME_SYNC → \(context.timeSyncForcePhone ? "用手机时间" : "回显")")
+            Log.i("LINK", "[\(tag)] HU_TIME_SYNC #\(note.count) 长度=\(frame.payload.count) → 确认 0x10601 模式=\(ack.mode.rawValue) 时间=\(ack.stamp)")
         }
         return ControlChannelResponse(replies: [PxcFrame(cmd: PxcCmd.huTimeSyncAck, payload: ack.payload)],
                                       events: [.timeSync(ack.mode)])
@@ -162,7 +162,7 @@ public final class ControlChannelHandler: @unchecked Sendable {
         let body = frame.payload.isEmpty ? "" : Self.loggable(frame)
         let hex = frame.payload.isEmpty ? "" : " hex=" + frame.payload.prefix(48).hexString
         let marker = frame.cmd == PxcCmd.screenTouch ? " *** SCREEN_TOUCH ***" : ""
-        Log.i("LINK", "[\(tag)] CFDL26 ctrl \(frame.cmdHex) (\(PxcCmd.name(of: frame.cmd)))\(marker) len=\(frame.payload.count) \(body)\(hex) → ack \(PxcCmd.hex(ack)) (empty)")
+        Log.i("LINK", "[\(tag)] CFDL26 控制 \(frame.cmdHex)（\(PxcCmd.name(of: frame.cmd))）\(marker) 长度=\(frame.payload.count) \(body)\(hex) → 确认 \(PxcCmd.hex(ack))（空）")
         return ControlChannelResponse(replies: [PxcFrame(cmd: ack)], events: [.acked(request: frame.cmd)])
     }
 }

@@ -34,11 +34,11 @@ public enum BikeProfiles {
     public static func select(info: BikeClientInfo, override: BikeProfileID?, log: Bool = true) -> BikeProfile {
         if let override {
             let p = BikeProfile.profile(override)
-            if log { Log.i("LINK", "[profile] manual override → \(p.name)") }
+            if log { Log.i("LINK", "[车型] 手动指定 → \(p.name)") }
             return p
         }
         let scored = scores(for: info)
-        if log { Log.i("LINK", "[profile] scores=" + scored.map { "\($0.profile.name)=\($0.score)" }.joined(separator: ", ")) }
+        if log { Log.i("LINK", "[车型] 评分=" + scored.map { "\($0.profile.name)=\($0.score)" }.joined(separator: "，")) }
         var best: (profile: BikeProfile, score: Int)?
         for entry in scored where entry.score > 0 {
             if best == nil || entry.score > best!.score { best = entry }
@@ -58,7 +58,7 @@ public enum BikeProfiles {
         let panel = BikeProfile.PanelSize(width: w, height: h)
         if panel == base.panelSize { return base }
         guard learnedGeometryFit(width: w, height: h) != nil else { return base }
-        Log.i("LINK", "[panel] using measured \(w)x\(h) (was \(base.name))")
+        Log.i("LINK", "[面板] 使用实测 \(w)x\(h)（原来是 \(base.name)）")
         return base.withMeasuredPanel(panel)
     }
 

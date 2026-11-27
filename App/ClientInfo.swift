@@ -150,7 +150,7 @@ public enum PhoneClientInfoReply {
             do {
                 sig = try signer.encryptedHUID(huid)
             } catch {
-                Log.e("LINK", "[:10922] !! encryptedHUID failed for HUID (\(huid.utf8.count) bytes): \(error) — sending \"\"")
+                Log.e("LINK", "[:10922] !! 加密 HUID 失败（\(huid.utf8.count) 字节）：\(error)——发送空串")
             }
         }
         let touch = profile.appendsScreenTouchKey &&
