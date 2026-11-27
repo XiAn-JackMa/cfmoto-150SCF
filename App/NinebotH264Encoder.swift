@@ -105,31 +105,12 @@ final class H264Encoder {
     private let fps: Int
     /// 高像素密度仪表（2048×968 的 2 倍屏）文字边缘对量化更敏感；打开后不再让编码器优先速度。
     private let prioritizeQuality: Bool
-    /// Serialises encode / complete / invalidate. VTCompressionSessionInvalidate waits for the
-    /// frames still in flight, so calling it while another thread is inside CompleteFrames hangs:
-    /// that wedged the receiver queue and left the app stuck on "starting CarPlay".
-    private let lock = NSLock()
-    /// Optional compression-quality bias (0 = smallest, 1 = best). Used by the static-picture pad
-    /// encoder: AverageBitRate alone does not cap a lone keyframe after an idle period, but Quality
-    /// biases quantisation directly, so one frame comes out small without rate-control history.
-    private let quality: Double?
-    /// Seconds between forced IDRs, passed straight to VideoToolbox.
-    ///
-    /// It used to be hard-wired to one second here while the settings page claimed to control it,
-    /// so raising the interval changed nothing: VideoToolbox still emitted an IDR every second and
-    /// the keyframe share never moved.
-    private let keyframeSeconds: Double
-    /// True when the session fell back to the software encoder (App in the background).
-    private(set) var usingSoftware = false
 
     init(width: Int, height: Int, fps: Int, bitrate: Int, prioritizeQuality: Bool = false,
          profileLevel: CFString = kVTProfileLevel_H264_Baseline_AutoLevel,
-         quality: Double? = nil, keyframeSeconds: Double = 1.0,
          output: @escaping (Result<H264EncodedFrame, Error>) -> Void) throws {
         self.fps = fps
         self.prioritizeQuality = prioritizeQuality
-        self.quality = quality
-        self.keyframeSeconds = keyframeSeconds
         callbackBox.handler = output
 
         let attributes: [CFString: Any] = [
@@ -157,16 +138,7 @@ final class H264Encoder {
         }
         // 不使用 kVTVideoEncoderSpecification_EnableLowLatencyRateControl：实测它把 SPS 改成
         // max_num_ref_frames=5 并带 VUI，与官方 iOS 码流（refs=1、无 VUI）不同，且手机端编码耗时没有下降
-        //
-        // 先要硬件编码器，再退到软件：iOS 在 App 进入后台后会作废硬件编码器，锁屏骑行时必须有人接上。
-        var (status, created) = create(nil)
-        if status != noErr || created == nil {
-            // The kVTVideoEncoderSpecification_* constant for this key is iOS 17.4+, and this app
-            // targets 16.0, so name the key the way the constant does.
-            let software = ["EnableHardwareAcceleratedVideoEncoder": false] as CFDictionary
-            (status, created) = create(software)
-            usingSoftware = true
-        }
+        let (status, created) = create(nil)
         guard status == noErr, let created else { throw H264EncoderError.create(status) }
         session = created
         do {
@@ -174,22 +146,6 @@ final class H264Encoder {
         } catch {
             VTCompressionSessionInvalidate(created)
             session = nil
-            // The session can be created and still refuse to start - which is what the hardware
-            // encoder does once the app has been in the background. Falling back only on
-            // creation failure left the dash with no picture at all, so try software here too.
-            let software = ["EnableHardwareAcceleratedVideoEncoder": false] as CFDictionary
-            let (retryStatus, retried) = create(software)
-            if retryStatus == noErr, let retried {
-                do {
-                    try configure(retried, bitrate: bitrate, profileLevel: profileLevel)
-                    session = retried
-                    usingSoftware = true
-                    return
-                } catch {
-                    VTCompressionSessionInvalidate(retried)
-                    session = nil
-                }
-            }
             throw error
         }
     }
@@ -199,16 +155,12 @@ final class H264Encoder {
             try set(kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
             try set(kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
             try set(kVTCompressionPropertyKey_ProfileLevel, value: profileLevel)
-            // Best effort: not every encoder honours Quality, and a rejected property must not
-            // cost us the session.
-            if let quality { try? set(kVTCompressionPropertyKey_Quality, value: quality as CFNumber) }
             try set(kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
             try set(kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
-            // Honour the configured interval: both the frame count and the duration, so a 3 s
-            // setting really is 3 s instead of whatever fps implied.
-            let intervalFrames = max(1, Int((keyframeSeconds * Double(fps)).rounded()))
-            try set(kVTCompressionPropertyKey_MaxKeyFrameInterval, value: intervalFrames as CFNumber)
-            try set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: keyframeSeconds as CFNumber)
+            // 关键帧节奏由 MirrorSession 每 0.5 秒强制请求（与官方 iOS 抓包、Android 版一致）；
+            // 这里的 1 秒只是兜底，避免两套计时错开导致每秒 3–4 个关键帧
+            try set(kVTCompressionPropertyKey_MaxKeyFrameInterval, value: fps as CFNumber)
+            try set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 1 as CFNumber)
             // 硬上限等于平均码率时，每秒一次的关键帧会把预算吃光，紧随其后的帧被丢弃，
             // 表现为每秒卡顿一下。留 1.5 倍余量吸收关键帧峰值。
             let byteLimit = max(1, bitrate * 3 / 2 / 8)
@@ -228,7 +180,6 @@ final class H264Encoder {
     deinit { invalidate() }
 
     func encode(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime, forceKeyframe: Bool) throws {
-        lock.lock(); defer { lock.unlock() }
         guard let session else { throw H264EncoderError.invalidated }
         var flags = VTEncodeInfoFlags()
         let properties: CFDictionary? = forceKeyframe
@@ -247,13 +198,11 @@ final class H264Encoder {
     }
 
     func complete() {
-        lock.lock(); defer { lock.unlock() }
         guard let session else { return }
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
     }
 
     func invalidate() {
-        lock.lock(); defer { lock.unlock() }
         guard let session else { return }
         VTCompressionSessionInvalidate(session)
         self.session = nil
@@ -261,7 +210,6 @@ final class H264Encoder {
     }
 
     private func set(_ key: CFString, value: CFTypeRef) throws {
-        lock.lock(); defer { lock.unlock() }
         guard let session else { throw H264EncoderError.invalidated }
         let status = VTSessionSetProperty(session, key: key, value: value)
         guard status == noErr else { throw H264EncoderError.property(key as String, status) }

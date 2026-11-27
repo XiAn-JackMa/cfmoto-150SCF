@@ -92,7 +92,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var patternTask: Task<Void, Never>?
     /// VideoToolbox encodes are serialized: the work queue and the pull path both encode.
     private let encodeLock = NSLock()
-    private var encoder: H264Encoder?
+    private var encoder: EasyConnH264Encoder?
     private var canvas: VideoCanvas?
     private var encoderSettings = EncoderParameters()
 
@@ -113,7 +113,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     private var lastCodecFailure = -Double.infinity
     private var lastKeyframe = -Double.infinity
     /// Result of the in-flight encode, written by the VideoToolbox callback under `lock`.
-    private var encodedResult: Result<H264EncodedFrame, Error>?
+    private var encodedResult: Result<EasyConnEncodedFrame, Error>?
     private var pending = 0
     private var skipping = false
     private var stopped = false
@@ -161,9 +161,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// A second encoder that compresses the still picture at a low bitrate, used to answer idle
     /// pulls when that is enabled. Separate from the main encoder so its rate control is never
     /// disturbed: the main one keeps producing full-quality frames the moment anything moves.
-    private var padEncoder: H264Encoder?
+    private var padEncoder: EasyConnH264Encoder?
     private var padCanvasKey = ""
-    private var padEncodedResult: Result<H264EncodedFrame, Error>?
+    private var padEncodedResult: Result<EasyConnEncodedFrame, Error>?
     /// Serialises pad encodes. The pad path is on the pull thread and must not block the main
     /// encode lock, which the work queue needs.
     private let padLock = NSLock()
@@ -204,10 +204,6 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// The dash keeps no cadence of its own, so without this the serve rate is whatever our reply
     /// latency allows (measured 51-116 pulls/s on a real 150SCF).
     private var serveInterval: TimeInterval = 0.05
-    /// Idle pacing: once the picture has been unchanged for `staticIdleSeconds`, serve at most
-    /// this rate. 5 fps is plenty for a static screen and cuts the idle bitrate fourfold, which
-    /// the static pad alone cannot guarantee for detailed content.
-    private let staticPaceInterval: TimeInterval = 1.0 / 5.0
     /// Uptime of the last frame handed to the dash; the pacing above measures from here.
     private var lastServeAt: TimeInterval = 0
 
@@ -331,7 +327,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         self.serveInterval = 1.0 / Double(max(1, CfMotoTuning.frameRate))
         self.allIntraOn = CfMotoTuning.allIntra
         let sizeChanged = previous == nil || previous!.width != canvas.width || previous!.height != canvas.height
-        var retired: H264Encoder?
+        var retired: EasyConnH264Encoder?
         if sizeChanged {
             retired = encoder
             encoder = nil
@@ -403,7 +399,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         if lock.withLock({ padRejectedGeneration == generation }) { return nil }
         let key = "\(canvas.width)x\(canvas.height)"
         lock.lock()
-        var retiredPad: H264Encoder?
+        var retiredPad: EasyConnH264Encoder?
         if padEncoder == nil || padCanvasKey != key {
             // Take it out of the field under the lock, invalidate it after releasing: its callback
             // stores the result under this same lock, so invalidating while holding it would hang
@@ -411,10 +407,10 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             retiredPad = padEncoder
             padEncoder = nil
             do {
-                padEncoder = try H264Encoder(
+                padEncoder = try EasyConnH264Encoder(
                     width: canvas.width, height: canvas.height,
                     fps: encoderSettings.frameRate, bitrate: CfMotoTuning.staticPadBitrate,
-                    profileLevel: CfMotoTuning.forceBaseline ? kVTProfileLevel_H264_Baseline_3_1 : kVTProfileLevel_H264_Main_AutoLevel,
+                    profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .mainAuto,
                     // Bias quantisation directly: a lone keyframe after idle would otherwise ignore
                     // the bitrate target entirely.
                     quality: CfMotoTuning.staticPadQuality,
@@ -443,7 +439,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                                                         preferredTimescale: 1_000_000),
                                forceKeyframe: true)
             encoder.complete()
-            var outcome: Result<H264EncodedFrame, Error>?
+            var outcome: Result<EasyConnEncodedFrame, Error>?
             let deadline = ProcessInfo.processInfo.systemUptime + 0.25
             repeat {
                 outcome = lock.withLock { padEncodedResult }
@@ -617,17 +613,12 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     func nextFrame(timeout: TimeInterval) async -> EncodedFrame? {
         let frame = await serveFrame(timeout: timeout)
         lock.lock()
-        let normal = serveInterval
-        let idle = lastPictureUptime > 0 ? ProcessInfo.processInfo.systemUptime - lastPictureUptime : 0
-        let staticIdle = staticIdleSeconds
+        let interval = serveInterval
         let last = lastServeAt
         lock.unlock()
         // Pace even an empty answer: a dash that gets nothing retries immediately, which would
         // spin the link at full speed through the first moments of a session.
-        // 静止降节奏：画面空闲超过静止判定时长后，把节奏降到 staticPaceInterval（默认 5 fps），
-        // 码率按比例下降；画面一动，下一次送帧立刻回到正常节奏。
-        let interval = idle >= staticIdle ? max(normal, staticPaceInterval) : normal
-        if last > 0 {
+        if interval > 0, last > 0 {
             let wait = interval - (ProcessInfo.processInfo.systemUptime - last)
             if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
         }
@@ -1025,7 +1016,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
     /// - Parameter force: force an IDR even if one is not due. The pull path uses it to pad a pull
     ///   with the *current* picture: only an IDR may be sent more than once (§15.2), and the dash
     ///   must not be shown a picture older than the one it already has.
-    private func encode(_ image: CVPixelBuffer, canvas: VideoCanvas, force: Bool = false) -> H264EncodedFrame? {
+    private func encode(_ image: CVPixelBuffer, canvas: VideoCanvas, force: Bool = false) -> EasyConnEncodedFrame? {
         // The work queue encodes new pictures while an idle pull may encode the last one.
         encodeLock.lock()
         defer { encodeLock.unlock() }
@@ -1038,9 +1029,9 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 let settings = encoderSettings
                 // The VideoToolbox callback runs on its own thread, so hand the result back through
                 // the lock instead of a local variable captured by the escaping closure.
-                encoder = try H264Encoder(width: canvas.width, height: canvas.height,
+                encoder = try EasyConnH264Encoder(width: canvas.width, height: canvas.height,
                                           fps: settings.frameRate, bitrate: settings.bitrate,
-                                          profileLevel: CfMotoTuning.forceBaseline ? kVTProfileLevel_H264_Baseline_3_1 : kVTProfileLevel_H264_Main_AutoLevel,
+                                          profileLevel: CfMotoTuning.forceBaseline ? .baseline31 : .mainAuto,
                                           keyframeSeconds: settings.keyframeIntervalSeconds) { [weak self] outcome in
                     guard let self else { return }
                     self.lock.lock(); self.encodedResult = outcome; self.lock.unlock()
@@ -1081,7 +1072,7 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
                 lock.lock(); lastKeyframeAU = frame.data; waitingForIDR = false; lock.unlock()
             }
             return frame
-        } catch H264EncoderError.frameDropped {
+        } catch EasyConnH264EncoderError.frameDropped {
             return nil
         } catch {
             lock.lock()
