@@ -14,6 +14,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let receiver = NativeReceiver()
     /// 春风 EasyConn 的画面参数面板（只在选中 EasyConn 时出现）。
     private let easyConnPanel = CfMotoEasyConnPanel()
+    /// 车把按键（音量通道）控制。
+    private let handlebarProbe = HandlebarProbe()
+    private let handlebarLogView = UITextView()
+    private var handlebarLines: [String] = []
+    private let handlebarDoubleWindowField = UITextField()
+    private let handlebarTargetVolumeSlider = UISlider()
+    private let handlebarTargetVolumeLabel = UILabel()
     private let antBMS = ANTBMSController()
     private let bluetooth = BLEBootstrap()
     private let sameDevice = SameDeviceProbe()
@@ -919,6 +926,29 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         controlBrowser.onLog = { [weak self] in self?.log($0) }
         receiverBrowser.onLog = { [weak self] in self?.log($0) }
+        // 车把按键日志视图（只读，可复制）。
+        handlebarLogView.isEditable = false
+        handlebarLogView.isSelectable = true
+        handlebarLogView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        handlebarLogView.backgroundColor = .secondarySystemBackground
+        handlebarLogView.layer.cornerRadius = 8
+        handlebarLogView.textContainerInset = UIEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
+        handlebarLogView.heightAnchor.constraint(equalToConstant: 220).isActive = true
+        // 车把按键：日志先回主线程（音量 KVO 可能在非主线程触发），再把识别出的控制交给 receiver。
+        handlebarProbe.onLog = { [weak self] line in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.appendHandlebarLine(line)
+                self.log(line)
+            }
+        }
+        handlebarProbe.onControl = { [weak self] control in self?.receiver.press(control) }
+        // 总开关持久化：上次开启过，这次启动就自动生效。
+        if HandlebarProbe.isEnabled { handlebarProbe.start() }
+        // 双击延迟输入框 + 目标音量进度条（控件事件只注册一次）。
+        handlebarDoubleWindowField.addTarget(self, action: #selector(handlebarDoubleWindowChanged), for: .editingDidEnd)
+        handlebarTargetVolumeSlider.addTarget(self, action: #selector(handlebarTargetVolumeChanged), for: .valueChanged)
+        handlebarTargetVolumeSlider.addTarget(self, action: #selector(handlebarTargetVolumeSaved), for: [.touchUpInside, .touchUpOutside])
         receiverBrowser.onTargets = { [weak self] targets in
             guard let self, !self.running, self.modeControl.selectedSegmentIndex == 2 else { return }
             if let selected = self.remoteTarget, !targets.contains(selected) { self.remoteTarget = nil }
@@ -2775,6 +2805,115 @@ extension ReceiverViewController {
         (settingsNavigation ?? self).present(alert, animated: true)
     }
 
+    // MARK: - 车把按键
+
+    private func handlebarPage() -> SettingsPageController {
+        page(CWL("车把按键")) { [unowned self] in
+            [
+                self.handlebarTargetVolumeSection(),
+                self.handlebarMappingSection(),
+                self.handlebarTimingSection(),
+                SettingsSection(footer: CWL("锁屏时车把音量键的原始记录，排查用。"), [
+                    .view(self.handlebarLogView),
+                    .action(CWL("复制记录"), icon: ("doc.on.doc", .systemBlue)) {
+                        UIPasteboard.general.string = self.handlebarLogView.text
+                    },
+                    .action(CWL("清空"), icon: ("trash", .systemGray), destructive: true) {
+                        self.handlebarLines.removeAll()
+                        self.handlebarLogView.text = ""
+                    }
+                ])
+            ]
+        }
+    }
+
+    private func handlebarTargetVolumeSection() -> SettingsSection {
+        let toggle = UISwitch()
+        toggle.isOn = handlebarProbe.isRunning
+        toggle.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            if toggle.isOn { self.handlebarProbe.start() } else { self.handlebarProbe.stop() }
+            HandlebarProbe.isEnabled = toggle.isOn
+            self.reloadVisibleSettings()
+        }, for: .valueChanged)
+
+        let slider = handlebarTargetVolumeSlider
+        slider.minimumValue = 1
+        slider.maximumValue = 100
+        slider.value = Float(HandlebarProbe.targetVolumePercent)
+        handlebarTargetVolumeLabel.text = CWL("目标音量：") + "\(Int(slider.value))%"
+        handlebarTargetVolumeLabel.font = .preferredFont(forTextStyle: .footnote)
+        handlebarTargetVolumeLabel.textColor = .secondaryLabel
+
+        return SettingsSection(CWL("开关与目标音量"),
+            footer: CWL("开启后保存状态，App 下次启动自动生效。锁屏后每次按键，音量都会立刻拨回下面的目标值。"), [
+                .control(CWL("启用车把按键控制"), icon: ("hand.tap", .systemGreen), toggle),
+                .control(CWL("目标音量"), icon: ("speaker.wave.2.fill", .systemOrange), slider),
+                .note(handlebarTargetVolumeLabel)
+            ])
+    }
+
+    private func handlebarMappingSection() -> SettingsSection {
+        let gestures: [HandlebarGesture] = [.arrowUpShort, .arrowDownShort, .arrowUpDouble, .arrowDownDouble]
+        let actions = HandlebarAction.allCases
+        let rows: [SettingsRow] = gestures.map { gesture in
+            let current = HandlebarMapping.action(for: gesture)
+            let menu = ChoiceMenu(items: actions.map(\.title))
+            menu.selectedSegmentIndex = actions.firstIndex(of: current) ?? 0
+            menu.addAction(UIAction { [weak self] _ in
+                guard self != nil else { return }
+                HandlebarMapping.set(actions[menu.selectedSegmentIndex], for: gesture)
+            }, for: .valueChanged)
+            return .control(gesture.title, icon: ("command", .systemIndigo), menu)
+        }
+        return SettingsSection(CWL("按键映射"),
+            footer: CWL("左边是车把动作，右边是要发给 CarPlay 的操作。默认：▲▼单击切换菜单、▲双击确认、▼双击返回。改动下次按键立即生效。"), rows)
+    }
+
+    private func handlebarTimingSection() -> SettingsSection {
+        handlebarDoubleWindowField.keyboardType = .decimalPad
+        handlebarDoubleWindowField.textAlignment = .right
+        handlebarDoubleWindowField.text = String(format: "%.2f", HandlebarMapping.doubleTapWindow)
+        handlebarDoubleWindowField.placeholder = "0.20"
+        return SettingsSection(CWL("双击延迟"),
+            footer: CWL("两次按键间隔小于这个时间就算双击，单位秒。默认 0.20 秒，改大更容易出双击。"), [
+                .field(CWL("双击间隔（秒）"), handlebarDoubleWindowField, placeholder: "0.20"),
+                .action(CWL("恢复默认映射与延迟"), icon: ("arrow.counterclockwise", .systemGray)) { [weak self] in
+                    HandlebarMapping.reset()
+                    self?.reloadVisibleSettings()
+                }
+            ])
+    }
+
+    private func appendHandlebarLine(_ line: String) {
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        handlebarLines.append("\(stamp)  \(line)")
+        if handlebarLines.count > 120 { handlebarLines.removeFirst(handlebarLines.count - 120) }
+        if handlebarLogView.window != nil {
+            handlebarLogView.text = handlebarLines.joined(separator: "\n")
+            if !handlebarLogView.text.isEmpty {
+                handlebarLogView.scrollRangeToVisible(NSRange(location: handlebarLogView.text.utf16.count - 1, length: 1))
+            }
+        }
+    }
+
+    @objc private func handlebarDoubleWindowChanged() {
+        let raw = handlebarDoubleWindowField.text?.replacingOccurrences(of: ",", with: ".") ?? ""
+        if let v = Double(raw.trimmingCharacters(in: .whitespaces)), v >= 0.1, v <= 1.0 {
+            HandlebarMapping.doubleTapWindow = v
+        }
+        handlebarDoubleWindowField.text = String(format: "%.2f", HandlebarMapping.doubleTapWindow)
+    }
+
+    @objc private func handlebarTargetVolumeChanged() {
+        handlebarTargetVolumeLabel.text = CWL("目标音量：") + "\(Int(handlebarTargetVolumeSlider.value))%"
+    }
+
+    @objc private func handlebarTargetVolumeSaved() {
+        HandlebarProbe.targetVolumePercent = Int(handlebarTargetVolumeSlider.value)
+        handlebarTargetVolumeLabel.text = CWL("目标音量：") + "\(Int(handlebarTargetVolumeSlider.value))%（已保存）"
+    }
+
     private func aboutLinks() -> [SettingsRow] {
         [
             .externalLink(CWL("GitHub 项目"), icon: ("chevron.left.forwardslash.chevron.right", .systemIndigo)) {
@@ -3376,7 +3515,14 @@ extension ReceiverViewController {
                 easyConnPanel.onChange = { [weak self] in
                     (self?.settingsNavigation?.topViewController as? SettingsPageController)?.reload()
                 }
-                return easyConnPanel.sections()
+                var sections = easyConnPanel.sections()
+                sections.append(SettingsSection(CWL("车把按键"), footer: CWL("锁屏时用车把音量键控制 CarPlay：单击切换、双击确认/返回，音量自动拨回目标值。"), [
+                    .page(CWL("车把按键"), icon: ("dot.radiowaves.left.and.right", .systemIndigo),
+                          detail: { [weak self] in self?.handlebarProbe.isRunning == true ? CWL("已开启") : CWL("已关闭") }) { [weak self] in
+                        self?.handlebarPage() ?? UIViewController()
+                    }
+                ]))
+                return sections
             case .ninebot, .ninebotSeven, .ninebot43:
                 let fiveInch = outputMode == .ninebot
                 let startup = ninebotInstructions
