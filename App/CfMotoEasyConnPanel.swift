@@ -215,8 +215,9 @@ final class CfMotoEasyConnPanel {
             onChange?()
             return
         }
-        let next = output?.testPatternEnabled != true
-        output?.setTestPattern(next)
+        // 1.0.83 的做法：测试图案自己起一条链路，不依赖 CarPlay 是否在跑。
+        let host = (addressField?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        output?.toggleTestPattern(host: host, port: CfMotoEasyConnOutput.probePort)
         onChange?()
     }
 
