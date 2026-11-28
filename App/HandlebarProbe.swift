@@ -1,94 +1,127 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// Probe for the motorcycle's handlebar buttons.
+// 春风 EasyConn 车把按键（只走音量通道）。
 //
-// The dash's buttons never travel over the EasyConn/Wi-Fi link: they are Bluetooth AVRCP commands
-// from the bike's BT module (docs/spec/input-controls.md §7). On iOS an app only sees AVRCP
-// transport keys while it is the "Now Playing" app, and on the non-touch dashes (this bike is one:
-// its CLIENT_INFO reports supportScreenTouch=false) ▲▼ arrive as absolute-volume steps rather than
-// key events.
+// 150SCF 是非触摸仪表，车把 ▲▼ 以「蓝牙 AVRCP 绝对音量」形式到达手机：每次按键真的改变
+// 系统音量。这里监听 outputVolume 的变化，锁屏时把它当作车把按键（单击/双击），转成
+// CarPlay 控制，然后立刻把音量写回用户设定的目标音量——所以骑多久音量都不漂。
 //
-// Measured on a 150SCF (probe run, 2026-11-23), which is why the mapping below looks like this:
-//   ▲▼        absolute-volume steps, one press = 0.05; a fast double is merged by the firmware into
-//             one 0.10 step, so a double is only visible as a bigger jump.
-//   enter     togglePlayPauseCommand (sometimes a bare next/previous arrives instead).
-//   holds     none: the dash never sends seek/FAST_FORWARD, so no key has a real press/release pair.
-// So the four volume gestures (▲▼ short/double) carry the whole UI — short is previous/next, double
-// is select/back — while SET and the track keys are transport keys that the music app owns during
-// playback, so they default to no mapping. See HandlebarMapping for the exact default.
+// 只走音量通道，因此不接管「正在播放」：SET 与 ▲▼ 长按等传输键本来就不需要，全部砍掉。
 
 import AVFoundation
 import Foundation
 import MediaPlayer
 import UIKit
 
-/// One raw event as observed on the phone.
+/// 一条原始按键记录，设置页的日志区用。
 struct HandlebarRawSample: Identifiable, Sendable, Equatable {
     let id = UUID()
     let date: Date
-    /// e.g. "playCommand", "togglePlayPauseCommand", "volume+" — the thing the bike actually sent.
+    /// 例如 "音量+"、"音量−"。
     let source: String
-    /// Extra detail: volume old→new, seek begin/end.
+    /// 附加信息：音量变化范围、步数等。
     let detail: String
 }
 
+/// 拨回音量的方式（用户可选，设置页持久化）。
+enum VolumeRestore: String, CaseIterable {
+    /// 依次尝试：私有 API → MPVolumeSlider → MPVolumeView，哪个成功用哪个。
+    case auto
+    /// AVSystemController.setVolumeTo:forCategory:（车机路径有效，已实测）。
+    case privateAPI
+    /// 直接实例化私有类 MPVolumeSlider，绕过 MPVolumeView 的「车机路径隐藏滑块」。
+    case mpVolumeSlider
+    /// 官方 MPVolumeView 里找 UISlider（非车机路径有效）。
+    case mpVolumeView
+
+    var title: String {
+        switch self {
+        case .auto: return "自动（推荐）"
+        case .privateAPI: return "私有 API"
+        case .mpVolumeSlider: return "MPVolumeSlider"
+        case .mpVolumeView: return "MPVolumeView"
+        }
+    }
+
+    /// 持久化的当前选择。
+    static var selected: VolumeRestore {
+        get {
+            let key = "easyConnHandlebarRestoreMode"
+            guard let raw = UserDefaults.standard.string(forKey: key),
+                  let mode = VolumeRestore(rawValue: raw) else { return .auto }
+            return mode
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "easyConnHandlebarRestoreMode") }
+    }
+}
+
 final class HandlebarProbe: @unchecked Sendable {
-    /// Called on the main thread for every observed event.
+    /// 每观察到一条事件就回调（主线程）。
     var onSample: ((HandlebarRawSample) -> Void)?
     var onLog: ((String) -> Void)?
-    /// When set, raw events are also turned into CarPlay controls. Nil = observe only.
+    /// 识别出手势后，把对应的 CarPlay 控制交给 App（主线程）。
     var onControl: ((CarPlayControl) -> Void)?
 
-    /// What the bike actually sends, measured on a 150SCF (see the class comment):
-    /// ▲▼ = absolute-volume steps, enter = togglePlayPause (and sometimes a bare next/previous),
-    /// no seek events at all, so there is no server-side hold.
+    // MARK: 设置（持久化，长期生效）
 
-    /// Last ▲ and ▼ press, per direction: a second press on the same arrow inside the window is a
-    /// double (the firmware merges a very fast one into a single bigger step, handled below).
-    private var lastArrow: [Int: Date] = [:]
-    /// Volume before we dial it back, so a ▲▼ press does not accumulate to full scale.
-    private var restoringVolume = false
-    private var savedVolume: Float?
-    /// Held-arrow repeat: while the dash keeps sending track keys, keep scrolling.
-    private var repeatTimer: Timer?
-    private var heldRepeatCount = 0
-    private let heldRepeatInterval: TimeInterval = 0.12
-    private let heldRepeatLimit = 40
-    /// Monotonic event counter and last-event time, so every raw line shows its own timing relative
-    /// to the previous press - that is what tells a single from a double in the log.
-    private var eventSequence = 0
-    private var lastEventAt: Date?
+    /// 车把按键控制总开关。开启后 App 启动自动生效。
+    static var isEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "easyConnHandlebarEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "easyConnHandlebarEnabled") }
+    }
 
-    private let lock = NSLock()
-    private var samples: [HandlebarRawSample] = []
-    private var commandTargets: [(MPRemoteCommand, Any)] = []
+    /// 目标音量（0–100）。每次按键后把系统音量拨回这个值。
+    static var targetVolumePercent: Int {
+        get {
+            let v = UserDefaults.standard.integer(forKey: "easyConnHandlebarTargetVolume")
+            return (1 ... 100).contains(v) ? v : 50
+        }
+        set { UserDefaults.standard.set(min(100, max(1, newValue)), forKey: "easyConnHandlebarTargetVolume") }
+    }
+
+    /// 目标音量换算成 0…1。
+    static var targetVolume: Float { Float(targetVolumePercent) / 100 }
+
+    /// 锁屏才生效：开（默认）时只有设备锁屏音量键才当车把按键；关时不锁屏也生效。
+    static var lockOnly: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "easyConnHandlebarLockOnly") == nil { return true }
+            return UserDefaults.standard.bool(forKey: "easyConnHandlebarLockOnly")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "easyConnHandlebarLockOnly") }
+    }
+
+    // MARK: 状态
+
     private var volumeObservation: NSKeyValueObservation?
-    /// Kept attached to the window so the MPVolumeView slider actually writes the system volume.
-    private var volumeView: MPVolumeView?
-    /// A single press is held back until the double window closes, so a slow double never fires the
-    /// single action first.
-    private var singleDelayTimers: [Int: Timer] = [:]
-    private var silent: AVAudioPlayer?
-    private var nowPlayingObservers: [NSObjectProtocol] = []
-    private var nowPlayingWatchdog: Timer?
-    private var nowPlayingRestarts = 0
-    private var nowPlayingTicks = 0
+    private var lockObservers: [NSObjectProtocol] = []
+    /// 设备是否锁屏。只有锁屏时才把音量键当车把按键。
+    private var screenLocked = false
     private(set) var isRunning = false
 
+    // 双击识别：每个方向记录上一次按下的时间，第二次落在双击窗口内即双击。
+    private var lastArrow: [Int: Date] = [:]
+    /// 第一次按下后延迟触发单击的定时器（等双击窗口关闭）。
+    private var singleDelayTimers: [Int: Timer] = [:]
+
+    /// 拨回音量用的离屏 MPVolumeView：只有挂到窗口，slider 写值才会真的改变系统音量。
+    private var volumeView: MPVolumeView?
+    /// 直接实例化的私有 MPVolumeSlider（拨回方式=MPVolumeSlider 时复用）。
+    private var volumeSlider: UISlider?
+
+    // 日志环
+    private let lock = NSLock()
+    private var samples: [HandlebarRawSample] = []
+
+    // MARK: 日志
+
     private func record(_ source: String, _ detail: String = "") {
-        let now = Date()
-        let seq: Int
-        let delta: String
+        let sample = HandlebarRawSample(date: Date(), source: source, detail: detail)
         lock.lock()
-        eventSequence += 1
-        seq = eventSequence
-        delta = lastEventAt.map { String(format: "+%.0fms", now.timeIntervalSince($0) * 1000) } ?? "首个"
-        lastEventAt = now
-        let sample = HandlebarRawSample(date: now, source: source, detail: detail)
         samples.append(sample)
         if samples.count > 60 { samples.removeFirst(samples.count - 60) }
         lock.unlock()
-        onLog?("[按键 #\(seq) \(delta)] \(source)\(detail.isEmpty ? "" : " · \(detail)")")
+        onLog?("\(source)\(detail.isEmpty ? "" : " · \(detail)")")
         DispatchQueue.main.async { [weak self] in self?.onSample?(sample) }
     }
 
@@ -97,177 +130,128 @@ final class HandlebarProbe: @unchecked Sendable {
         return samples
     }
 
-    /// Number of samples seen, for a cheap "is anything arriving at all" check.
+    /// 已观察到的条数，用于设置页「有没有收到」的廉价判断。
     var count: Int {
         lock.lock(); defer { lock.unlock() }
         return samples.count
     }
 
-    // MARK: - Lifecycle
+    // MARK: 生命周期
 
-    /// Registers every remote command and starts watching the volume.
-    ///
-    /// Deliberately does NOT try to become Now Playing by itself: `becomeNowPlaying` below is what a
-    /// test has to call, and whether the bike displaces other audio is exactly what the probe reports.
     func start() {
         guard !isRunning else { return }
         isRunning = true
-        registerCommands()
+        lock.lock()
+        // 只用数据保护状态判断锁屏；不用 applicationState（切到别的 App 也是后台，会误判）。
+        screenLocked = !UIApplication.shared.isProtectedDataAvailable
+        lock.unlock()
+        observeLockState()
+        // 备用挂窗（自动 / MPVolumeView 模式需要）；私有 API 模式用不到。
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            _ = self.ensureVolumeView()
+        }
         startVolumeObservation()
-        onLog?("[探测] 车把按键探测已启动（未接管音频会话）")
+        onLog?("[车把] 已启用：目标音量 \(Self.targetVolumePercent)% · 拨回方式=\(VolumeRestore.selected.title)")
     }
 
     func stop() {
         guard isRunning else { return }
         isRunning = false
-        for (command, target) in commandTargets {
-            command.removeTarget(target)
-            command.isEnabled = false
-        }
-        commandTargets.removeAll()
         volumeObservation?.invalidate()
         volumeObservation = nil
-        repeatTimer?.invalidate(); repeatTimer = nil
         singleDelayTimers.values.forEach { $0.invalidate() }
         singleDelayTimers.removeAll()
+        lastArrow.removeAll()
         volumeView?.removeFromSuperview()
         volumeView = nil
-        stopNowPlayingKeepAlive()
-        silent?.stop()
-        silent = nil
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        onLog?("[探测] 车把按键探测已停止")
+        volumeSlider = nil
+        removeLockObservers()
+        onLog?("[车把] 已停用")
     }
 
-    // MARK: - Commands
+    // MARK: 锁屏
 
-    private func registerCommands() {
-        let center = MPRemoteCommandCenter.shared()
-
-        func add(_ command: MPRemoteCommand, _ name: String) {
-            command.isEnabled = true
-            let target = command.addTarget { [weak self] _ in
-                self?.record(name)
-                return .success
+    private func observeLockState() {
+        removeLockObservers()
+        let center = NotificationCenter.default
+        // 只用 Data Protection 通知判断锁屏：它精确对应「设备锁屏/解锁」，
+        // 不像 didEnterBackground 会把「切到别的 App（设备未锁屏）」误判成锁屏。
+        lockObservers = [
+            center.addObserver(forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.lock.lock(); self.screenLocked = true; self.lock.unlock()
+                // 关闭「锁屏才生效」后，锁屏不再影响行为，这条提示也就不必刷了。
+                if Self.lockOnly {
+                    self.onLog?("[车把] 已锁屏（数据保护）：音量键开始当作车把按键")
+                }
+            },
+            center.addObserver(forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.lock.lock(); self.screenLocked = false; self.lock.unlock()
+                if Self.lockOnly {
+                    self.onLog?("[车把] 已解锁（数据保护）：音量键恢复正常调音量")
+                }
+            },
+            // 每次回到前台活跃时，确保拨回用的 MPVolumeView 已就绪（锁屏拨回复用它）。
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                _ = self.ensureVolumeView()
             }
-            commandTargets.append((command, target))
-        }
-
-        center.playCommand.isEnabled = true
-        commandTargets.append((center.playCommand, center.playCommand.addTarget { [weak self] _ in
-            self?.record("playCommand"); self?.handleSelect(); return .success
-        }))
-        center.pauseCommand.isEnabled = true
-        commandTargets.append((center.pauseCommand, center.pauseCommand.addTarget { [weak self] _ in
-            self?.record("pauseCommand"); self?.handleSelect(); return .success
-        }))
-        center.togglePlayPauseCommand.isEnabled = true
-        commandTargets.append((center.togglePlayPauseCommand, center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            self?.record("togglePlayPauseCommand"); self?.handleSelect(); return .success
-        }))
-        center.nextTrackCommand.isEnabled = true
-        commandTargets.append((center.nextTrackCommand, center.nextTrackCommand.addTarget { [weak self] _ in
-            self?.record("nextTrackCommand"); self?.handleTrack(forward: true); return .success
-        }))
-        center.previousTrackCommand.isEnabled = true
-        commandTargets.append((center.previousTrackCommand, center.previousTrackCommand.addTarget { [weak self] _ in
-            self?.record("previousTrackCommand"); self?.handleTrack(forward: false); return .success
-        }))
-
-        // Seek commands are how a long press usually surfaces; without them a hold looks like a tap.
-        center.skipForwardCommand.isEnabled = true
-        commandTargets.append((center.skipForwardCommand, center.skipForwardCommand.addTarget { [weak self] _ in
-            self?.record("skipForwardCommand")
-            return .success
-        }))
-        center.skipBackwardCommand.isEnabled = true
-        commandTargets.append((center.skipBackwardCommand, center.skipBackwardCommand.addTarget { [weak self] _ in
-            self?.record("skipBackwardCommand")
-            return .success
-        }))
-
-        center.seekForwardCommand.isEnabled = true
-        commandTargets.append((center.seekForwardCommand, center.seekForwardCommand.addTarget { [weak self] event in
-            guard let seek = event as? MPSeekCommandEvent else { return .commandFailed }
-            self?.record("seekForwardCommand", seek.type == .beginSeeking ? "按住开始" : "按住结束")
-            return .success
-        }))
-        center.seekBackwardCommand.isEnabled = true
-        commandTargets.append((center.seekBackwardCommand, center.seekBackwardCommand.addTarget { [weak self] event in
-            guard let seek = event as? MPSeekCommandEvent else { return .commandFailed }
-            self?.record("seekBackwardCommand", seek.type == .beginSeeking ? "按住开始" : "按住结束")
-            return .success
-        }))
-
-        // Everything else: recorded so a firmware surprise shows up instead of being ignored.
-        center.changePlaybackPositionCommand.isEnabled = true
-        commandTargets.append((center.changePlaybackPositionCommand,
-                               center.changePlaybackPositionCommand.addTarget { [weak self] event in
-            let time = (event as? MPChangePlaybackPositionCommandEvent)?.positionTime ?? 0
-            self?.record("changePlaybackPositionCommand", "位置 \(Int(time))s")
-            return .success
-        }))
-        center.stopCommand.isEnabled = true
-        commandTargets.append((center.stopCommand, center.stopCommand.addTarget { [weak self] _ in
-            self?.record("stopCommand")
-            return .success
-        }))
+        ]
     }
 
-    // MARK: - Volume (▲▼ on a non-touch dash)
+    private func removeLockObservers() {
+        lockObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        lockObservers = []
+    }
+
+    // MARK: 音量观察
 
     private func startVolumeObservation() {
         let session = AVAudioSession.sharedInstance()
-        record("起始音量", String(format: "%.2f", session.outputVolume))
+        record("起始音量", String(format: "%.0f%%", session.outputVolume * 100))
         volumeObservation = session.observe(\.outputVolume, options: [.old, .new]) { [weak self] _, change in
             guard let self, let old = change.oldValue, let new = change.newValue, old != new else { return }
-            // Our own dial-back must not look like another press.
-            guard !self.restoringVolume else { return }
-            let steps = abs(new - old)
-            self.record(new > old ? "音量+" : "音量−",
-                        String(format: "%.2f → %.2f（%.3f，约 %d 格）", old, new, steps, Int((steps * 16).rounded())))
-            self.handleVolume(direction: new > old ? 1 : -1, steps: steps)
+            // 回声过滤：new 落在目标音量附近（半格内），就是自己刚拨回的那次，忽略。
+            if abs(new - Self.targetVolume) < 0.032 { return }
+            // 锁屏才生效开关：开时未锁屏就正常调音量；关时不锁屏也当车把按键。
+            self.lock.lock(); let locked = self.screenLocked; self.lock.unlock()
+            if Self.lockOnly && !locked {
+                self.onLog?("[音量] 未锁屏：音量键正常调音量（\(Int(new * 100))%），不触发车把")
+                return
+            }
+            self.handleVolume(direction: new > old ? 1 : -1)
         }
     }
 
-    // MARK: - Raw events → CarPlay controls
-    //
-    // What this dashboard gives the phone (measured, and matches the owner's manual):
-    //   ▲▼ short   absolute-volume step (+/- 0.05) — and the manual says it also means "previous /
-    //              next item" on menus, which is what we map it to. Because the volume really moves,
-    //              every step is undone below, or 20 presses would leave ▲ with nothing to send.
-    //   ▲▼ long    previousTrack / nextTrack — a separate, clean event.
-    //   SET long   togglePlayPause.
-    //   SET short  consumed by the dash (opens its settings menu) — the phone never sees it.
-    //   BACK       consumed by the dash — the phone never sees it.
-    // So confirm and back cannot come from their own buttons and are built from doubles.
+    // MARK: 手势识别
 
-    /// ▲/▼ volume step. A merged jump (≥0.075) is a double by itself; otherwise the single action is
-    /// held back until the double window closes, so a slow double never fires the single first.
-    private func handleVolume(direction: Int, steps: Float) {
-        restoreVolume(direction: direction, steps: steps)
-        guard onControl != nil else { return }
+    /// ▲/▼ 音量步进。双击判定纯按时间间隔：同方向第二次落在双击窗口内即双击，
+    /// 否则第一次先憋住，窗口结束没有第二次才判单击。
+    /// 注意步进大小随音量区间变化（低位一档 2 格、高位一档 1 格），不能拿步进当双击信号。
+    private func handleVolume(direction: Int) {
+        guard onControl != nil else {
+            // 没有回调（映射为不执行）也要把音量拨回，保持音量基线。
+            restoreToTargetVolume()
+            return
+        }
         let now = Date()
 
-        if steps >= Float(0.075) {
-            // The firmware merged a fast double into one bigger step.
-            cancelPendingSingle(direction)
-            lastArrow[direction] = nil
-            onLog?("[手势] 步进 \(String(format: "%.3f", steps)) ≥ 0.075，固件已合并 → 双击")
-            fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
-            return
-        }
-
         if let last = lastArrow[direction], now.timeIntervalSince(last) < HandlebarMapping.doubleTapWindow {
-            // Second small step inside the window: a slow double.
+            // 双击窗口内的第二次：双击。判定结束，统一拨回一次。
             cancelPendingSingle(direction)
             lastArrow[direction] = nil
-            onLog?("[手势] 与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last) * 1000))ms < 双击窗口 \(String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000))ms → 双击（取消单击）")
+            onLog?("与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last) * 1000))ms → 双击")
+            restoreToTargetVolume()
             fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
             return
         }
 
-        // First small step: could still be the first half of a slow double, so delay the single.
+        // 第一次：憋住不拨回，等双击窗口结束再决定单击/双击。
         lastArrow[direction] = now
         cancelPendingSingle(direction)
         let d = direction
@@ -275,13 +259,15 @@ final class HandlebarProbe: @unchecked Sendable {
             guard let self else { return }
             self.lastArrow[d] = nil
             self.singleDelayTimers[d] = nil
+            // 单击判定结束，拨回一次。
+            self.restoreToTargetVolume()
             guard self.onControl != nil else { return }
-            self.onLog?("[手势] 双击窗口结束，无第二次 → 单击")
+            self.onLog?("双击窗口结束，无第二次 → 单击")
             self.fire(d > 0 ? .arrowUpShort : .arrowDownShort)
         }
         RunLoop.main.add(timer, forMode: .common)
         singleDelayTimers[direction] = timer
-        onLog?("[手势] 记录 \(direction > 0 ? "▲" : "▼") 首次按下，等待双击窗口 \(String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000))ms 后判定")
+        onLog?("记录 \(direction > 0 ? "▲" : "▼") 首次按下，等待双击窗口 \(String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000))ms")
     }
 
     private func cancelPendingSingle(_ direction: Int) {
@@ -289,40 +275,123 @@ final class HandlebarProbe: @unchecked Sendable {
         singleDelayTimers[direction] = nil
     }
 
-    /// Puts the system volume back where the press found it, so ▲▼ stay usable at full scale.
-    ///
-    /// The dash reads its own arrow as a volume key, so the phone's volume is a side effect of
-    /// navigating. `MPVolumeView`'s slider is the supported way to write `outputVolume`, but only
-    /// while the view is attached to a window — a detached one does nothing, so we keep one mounted
-    /// off-screen and reuse it. The change it makes is filtered out so it is not taken for another press.
-    private func restoreVolume(direction: Int, steps: Float) {
-        let session = AVAudioSession.sharedInstance()
-        let current = session.outputVolume
-        let target = max(0, min(1, current - (direction > 0 ? steps : -steps)))
-        restoringVolume = true
-        onLog?("[回拨] 音量 \(String(format: "%.3f", current)) → \(String(format: "%.3f", target))（\(direction > 0 ? "↑" : "↓") 回拨 \(String(format: "%.3f", steps))）")
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            if self.volumeView == nil {
-                let volumeView = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 100, height: 100))
-                volumeView.alpha = 0.01
-                let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-                let window = scene?.windows.first(where: { $0.isKeyWindow }) ?? scene?.windows.first
-                window?.addSubview(volumeView)
-                volumeView.setNeedsLayout()
-                volumeView.layoutIfNeeded()
-                self.volumeView = volumeView
-            }
-            if let slider = self.findVolumeSlider(in: self.volumeView!) {
-                slider.value = target
-                slider.sendActions(for: .touchUpInside)
-                self.onLog?("[回拨] 已写入目标音量（MPVolumeView 挂窗）")
-            } else {
-                self.onLog?("[回拨] 未找到音量 slider，音量可能没有拨回")
-            }
-            // The write echoes back through the observer; ignore it, then allow presses again.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.restoringVolume = false }
+    /// 按映射表执行一个手势。
+    private func fire(_ gesture: HandlebarGesture) {
+        let action = HandlebarMapping.action(for: gesture)
+        guard action != .none, let control = action.control else { return }
+        record("\(gesture.title) = \(action.title)")
+        DispatchQueue.main.async { [weak self] in self?.onControl?(control) }
+    }
+
+    // MARK: 拨回目标音量
+
+    /// 离屏 MPVolumeView 挂到窗口上，返回它内部的 UISlider。slider 是懒生成的，所以
+    /// 尽量在 App 前台时先调用一次（start 里），后台复用同一个实例。
+    private func ensureVolumeView() -> UISlider? {
+        if volumeView == nil {
+            let view = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 100, height: 100))
+            view.alpha = 0.01
+            view.showsRouteButton = false
+            // 优先用旧 API（1.0.83 原版用的）：它在 Scene 与非 Scene 生命周期都返回窗口；
+            // connectedScenes.windows 在窗口尚未完全建立时可能为空，导致挂窗失败。
+            let window = UIApplication.shared.windows.first(where: { $0.isKeyWindow })
+                ?? UIApplication.shared.windows.first
+            window?.addSubview(view)
+            view.setNeedsLayout()
+            view.layoutIfNeeded()
+            volumeView = view
         }
+        guard let view = volumeView else { return nil }
+        if let slider = findVolumeSlider(in: view) { return slider }
+        // slider 可能还没生成，再催一次布局后重找。
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        return findVolumeSlider(in: view)
+    }
+
+    /// 把系统音量写回用户设定的目标音量。回声在 startVolumeObservation 里按「值匹配」过滤。
+    private func restoreToTargetVolume() {
+        let target = Self.targetVolume
+        DispatchQueue.main.async { [weak self] in
+            self?.writeVolume(target: target, attempt: 0)
+        }
+    }
+
+    /// 按用户选择的模式写音量，成功后只打一行结果。
+    private func writeVolume(target: Float, attempt: Int) {
+        let percent = Int(target * 100)
+        switch VolumeRestore.selected {
+        case .auto:
+            if setSystemVolume(target) {
+                onLog?("已写入音量 \(percent)%（私有 API）\n"); return
+            }
+            if commitMPVolumeSlider(target) {
+                onLog?("已写入音量 \(percent)%（MPVolumeSlider）\n"); return
+            }
+            if commitMPVolumeView(target) {
+                onLog?("已写入音量 \(percent)%（MPVolumeView）\n"); return
+            }
+            retryOrFail(target, attempt)
+        case .privateAPI:
+            if setSystemVolume(target) {
+                onLog?("已写入音量 \(percent)%（私有 API）\n")
+            } else {
+                retryOrFail(target, attempt)
+            }
+        case .mpVolumeSlider:
+            if commitMPVolumeSlider(target) {
+                onLog?("已写入音量 \(percent)%（MPVolumeSlider）\n")
+            } else {
+                retryOrFail(target, attempt)
+            }
+        case .mpVolumeView:
+            if commitMPVolumeView(target) {
+                onLog?("已写入音量 \(percent)%（MPVolumeView）\n")
+            } else {
+                retryOrFail(target, attempt)
+            }
+        }
+    }
+
+    /// 写失败时 0.3 秒后重试，最多 3 次。
+    private func retryOrFail(_ target: Float, _ attempt: Int) {
+        if attempt < 3 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.writeVolume(target: target, attempt: attempt + 1)
+            }
+        } else {
+            onLog?("拨回失败（\(VolumeRestore.selected.title)）\n")
+        }
+    }
+
+    /// 直接实例化私有类 MPVolumeSlider 写音量，绕过 MPVolumeView 的「车机路径隐藏滑块」。
+    /// 用 ObjC 运行时 alloc + init 创建（元类型 init(frame:) 因非 required 无法通过编译）。
+    private func commitMPVolumeSlider(_ target: Float) -> Bool {
+        if volumeSlider == nil {
+            guard let cls: AnyClass = NSClassFromString("MPVolumeSlider") else { return false }
+            guard let slider = cls.alloc().perform(NSSelectorFromString("init"))?.takeUnretainedValue() as? UISlider else {
+                return false
+            }
+            volumeSlider = slider
+        }
+        guard let slider = volumeSlider else { return false }
+        slider.value = target
+        slider.sendActions(for: .touchUpInside)
+        return true
+    }
+
+    /// 官方 MPVolumeView 里找 UISlider 写音量。
+    private func commitMPVolumeView(_ target: Float) -> Bool {
+        guard let slider = ensureVolumeView() else { return false }
+        slider.value = target
+        slider.sendActions(for: .touchUpInside)
+        return true
+    }
+
+    /// 私有 API：AVSystemController 设置系统媒体音量（0~1）。自用，非 App Store。
+    /// 实现走 Bridging Header 的 C 函数（NSClassFromString + NSInvocation），避免链接私有符号。
+    private func setSystemVolume(_ volume: Float) -> Bool {
+        return tds_set_system_volume(volume)
     }
 
     private func findVolumeSlider(in view: UIView) -> UISlider? {
@@ -331,197 +400,5 @@ final class HandlebarProbe: @unchecked Sendable {
             if let found = findVolumeSlider(in: subview) { return found }
         }
         return nil
-    }
-
-    /// SET reaches the phone only as a play/pause command, and only when SET is HELD: a short SET
-    /// opens the dash's own settings menu and the phone never sees it. So the play/pause event here
-    /// IS the long press — there is no press/release pair to time, and the old 0.12 s / 0.60 s
-    /// timers always resolved to "short" before the hold could ever fire.
-    private func handleSelect() {
-        guard onControl != nil else { return }
-        let music = AVAudioSession.sharedInstance().isOtherAudioPlaying
-        let action = HandlebarMapping.action(for: .setLong)
-        onLog?("[SET] 收到（播放/暂停 = SET 长按）· 映射 \(action.title) · 此刻其它音频在播 \(music ? "是" : "否")")
-        fire(.setLong)
-    }
-
-    /// ▲/▼ long press: a clean track key with no volume side effect. A held arrow keeps sending them,
-    /// so they can either keep scrolling (repeat) or act once.
-    private func handleTrack(forward: Bool) {
-        guard onControl != nil else { return }
-        lastArrow[forward ? 1 : -1] = nil
-        let music = AVAudioSession.sharedInstance().isOtherAudioPlaying
-        let gesture: HandlebarGesture = forward ? .arrowDownLong : .arrowUpLong
-        let action = HandlebarMapping.action(for: gesture)
-        onLog?("[按键] \(forward ? "下一曲(▼长按)" : "上一曲(▲长按)") 收到 · 映射 \(action.title) · 此刻其它音频在播 \(music ? "是" : "否")")
-        if action == .none { return }
-        fire(gesture)
-        guard HandlebarMapping.repeatsWhenHeld, action == .knobNext || action == .knobPrevious else { return }
-        startHeldRepeat(action)
-    }
-
-    /// Keeps scrolling while the dash keeps sending track keys. Each new event restarts the timer, so
-    /// letting go stops it within one interval.
-    private func startHeldRepeat(_ action: HandlebarAction) {
-        repeatTimer?.invalidate()
-        repeatTimer = Timer.scheduledTimer(withTimeInterval: heldRepeatInterval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.onControl?(action.control ?? .select)
-            self.heldRepeatCount += 1
-            if self.heldRepeatCount >= self.heldRepeatLimit {
-                self.repeatTimer?.invalidate(); self.repeatTimer = nil
-            }
-        }
-    }
-
-    /// Runs the configured action for a gesture.
-    private func fire(_ gesture: HandlebarGesture) {
-        let action = HandlebarMapping.action(for: gesture)
-        guard action != .none, let control = action.control else { return }
-        record("→ \(gesture.title) = \(action.title)", "")
-        onControl?(control)
-    }
-
-    // MARK: - Now Playing claim (what makes the keys arrive at all)
-
-    /// Whether this app currently looks like the "Now Playing" app, which is the condition iOS puts
-    /// on delivering AVRCP transport keys. `nowPlayingInfo` is the cheap proxy the UI reads; the
-    /// watchdog below also checks that the silent loop is actually still playing, because a cleared
-    /// or interrupted session can keep the info while the keys have already moved to the music app.
-    var isNowPlaying: Bool { MPNowPlayingInfoCenter.default().nowPlayingInfo != nil }
-
-    /// Publishes Now Playing info and starts a near-silent loop, so the bike sends its keys here
-    /// instead of to the music app. Because the loop is mixed (`.mixWithOthers`) it no longer pauses
-    /// the user's music; the probe reports whether the claim worked rather than pretending.
-    @discardableResult
-    func becomeNowPlaying() -> Bool {
-        logAudioState("接管前")
-        let ok = replaySilentLoop()
-        if ok {
-            let music = AVAudioSession.sharedInstance().isOtherAudioPlaying
-            record("已接管正在播放（混音模式，不暂停音乐）",
-                   music ? "检测到其它音频仍在播" : "当前没有其它音频")
-            startNowPlayingKeepAlive()
-        } else {
-            onLog?("[探测] 接管播放失败（此时车机会继续把按键发给音乐 App）")
-        }
-        return ok
-    }
-
-    /// Rebuilds the silent loop and the Now Playing info. Factored out so the first claim and the
-    /// watchdog's revive share exactly the same path.
-    ///
-    /// Uses `.mixWithOthers` on purpose: the old exclusive `[]` category paused the user's music and
-    /// fought BackgroundKeepAlive for the same session. Mixing keeps music playing and still sets
-    /// `nowPlayingInfo`, which is what the bike's transport keys are supposed to follow.
-    @discardableResult
-    private func replaySilentLoop() -> Bool {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true)
-            let player = try AVAudioPlayer(data: BackgroundKeepAlive.silentLoopData,
-                                           fileTypeHint: AVFileType.wav.rawValue)
-            player.numberOfLoops = -1
-            player.volume = 0.01
-            player.prepareToPlay()
-            guard player.play() else {
-                onLog?("[保活] 静音循环被系统拒绝播放")
-                return false
-            }
-            silent = player
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = [
-                MPMediaItemPropertyTitle: "CarWithin",
-                MPMediaItemPropertyArtist: "车把按键探测",
-                MPNowPlayingInfoPropertyPlaybackRate: 1.0,
-                MPNowPlayingInfoPropertyIsLiveStream: true
-            ]
-            logAudioState("接管后")
-            return true
-        } catch {
-            onLog?("[保活] 重建静音循环失败：\(error.localizedDescription)")
-            return false
-        }
-    }
-
-    /// Watches the Now Playing claim. The silent loop is the only thing keeping the bike's keys
-    /// arriving here; if it stops (interruption, route change, another app taking the session) the
-    /// keys silently leak to the music app, so every death is revived and logged with its reason.
-    private func startNowPlayingKeepAlive() {
-        stopNowPlayingKeepAlive()
-        nowPlayingRestarts = 0
-        nowPlayingTicks = 0
-        let center = NotificationCenter.default
-        nowPlayingObservers = [
-            center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
-                guard let self else { return }
-                let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
-                let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt ?? 0
-                let kind = AVAudioSession.InterruptionType(rawValue: raw) == .ended ? "结束" : "开始"
-                self.onLog?("[保活] 音频中断：\(kind)（type=\(raw) reason=\(reason)）")
-                self.logAudioState("中断时")
-                if AVAudioSession.InterruptionType(rawValue: raw) == .ended {
-                    self.reviveNowPlaying(reason: "音频中断结束")
-                }
-            },
-            center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
-                guard let self else { return }
-                self.onLog?("[保活] 系统媒体服务重置")
-                self.silent = nil
-                self.reviveNowPlaying(reason: "媒体服务重置")
-            },
-            center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
-                guard let self else { return }
-                let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
-                self.onLog?("[保活] 音频路由变化（reason=\(raw)）")
-                self.logAudioState("路由变化时")
-                if self.silent?.isPlaying != true {
-                    self.reviveNowPlaying(reason: "路由变化")
-                }
-            }
-        ]
-        // Catches everything else (session deactivated, category changed, player stopped) — the
-        // observers only cover the events iOS bothers to announce.
-        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.nowPlayingTicks += 1
-            let playing = self.silent?.isPlaying == true
-            let claimed = MPNowPlayingInfoCenter.default().nowPlayingInfo != nil
-            if !playing || !claimed {
-                self.reviveNowPlaying(reason: playing ? "nowPlayingInfo 丢失" : "静音循环停止")
-            } else if self.nowPlayingTicks % 15 == 0 {
-                self.onLog?("[保活] 心跳正常（第 \(self.nowPlayingTicks) 次检查 · 静音在播 · NowPlaying 已声明 · 其它音频在播 \(AVAudioSession.sharedInstance().isOtherAudioPlaying ? "是" : "否")）")
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        nowPlayingWatchdog = timer
-        onLog?("[保活] 已开始监视 Now Playing（每 2 秒查一次，断了就重建并记录原因）")
-    }
-
-    private func reviveNowPlaying(reason: String) {
-        nowPlayingRestarts += 1
-        logAudioState("恢复前（\(reason)）")
-        let ok = replaySilentLoop()
-        if nowPlayingRestarts <= 3 || nowPlayingRestarts % 10 == 0 {
-            onLog?(ok
-                ? "[保活] 已恢复（\(reason)，第 \(nowPlayingRestarts) 次）"
-                : "[保活] 恢复失败（\(reason)，第 \(nowPlayingRestarts) 次）——车机按键将漏给音乐 App")
-        }
-    }
-
-    private func stopNowPlayingKeepAlive() {
-        nowPlayingWatchdog?.invalidate(); nowPlayingWatchdog = nil
-        nowPlayingObservers.forEach(NotificationCenter.default.removeObserver)
-        nowPlayingObservers = []
-    }
-
-    /// One line with the audio-session facts that decide whether the bike's keys still reach us.
-    private func logAudioState(_ label: String) {
-        let session = AVAudioSession.sharedInstance()
-        let route = session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ",")
-        let options = session.categoryOptions
-        let optionText = options.contains(.mixWithOthers) ? "混音" : (options.isEmpty ? "独占" : String(options.rawValue))
-        let claimed = MPNowPlayingInfoCenter.default().nowPlayingInfo != nil
-        onLog?("[保活] \(label)：类别 \(session.category.rawValue) · 选项 \(optionText)(\(options.rawValue)) · 模式 \(session.mode.rawValue) · 路由 \(route.isEmpty ? "无" : route) · 其它音频在播 \(session.isOtherAudioPlaying ? "是" : "否") · 静音循环在播 \(silent?.isPlaying == true ? "是" : "否") · nowPlayingInfo \(claimed ? "已设" : "空")")
     }
 }

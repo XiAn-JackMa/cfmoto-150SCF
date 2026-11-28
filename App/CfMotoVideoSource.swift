@@ -12,6 +12,7 @@ import AVFoundation
 
 import CoreImage
 import Foundation
+import UIKit
 import VideoToolbox
 
 struct CfMotoLiveStats {
@@ -360,14 +361,14 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
             queue.invalidateKeyframe()
             queue.resynchronize()
         }
-        // Seed a black picture so the very first pull has an answer. Without it the dash's first
+        // Seed a hint picture so the very first pull has an answer. Without it the dash's first
         // 114 finds nothing, waits out its 9 s timeout and drops the link - twice in a row after a
         // restart, which is what made "start CarPlay" appear to hang on 正在连接 until the simulator
         // was restarted too. CarPlay replaces this the moment it produces a frame.
         lock.lock(); lastInboundAt = Date(); lock.unlock()
         if lock.withLock({ fittedBuffer == nil }) {
-            if let black = blackFrame(width: canvas.width, height: canvas.height) {
-                lock.lock(); fittedBuffer = black; lock.unlock()
+            if let hint = hintFrame(width: canvas.width, height: canvas.height) {
+                lock.lock(); fittedBuffer = hint; lock.unlock()
             }
         }
         // After the queue reset above, so the pattern's first keyframe is not flushed by it.
@@ -1074,17 +1075,43 @@ final class CfMotoVideoSource: VideoFrameSource, @unchecked Sendable {
         }
     }
 
-    /// A black picture at the canvas size, used to answer the first pulls of a session.
-    private func blackFrame(width: Int, height: Int) -> CVPixelBuffer? {
+    /// Draws a black frame with a short hint telling the rider the phone-side CarPlay has not
+    /// produced a picture yet. CarPlay replaces this the moment it delivers its first frame.
+    private func hintFrame(width: Int, height: Int) -> CVPixelBuffer? {
         var buffer: CVPixelBuffer?
         let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary
         guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
                                   attributes, &buffer) == kCVReturnSuccess, let buffer else { return nil }
         CVPixelBufferLockBaseAddress(buffer, [])
-        if let base = CVPixelBufferGetBaseAddress(buffer) {
-            memset(base, 0, CVPixelBufferGetDataSize(buffer))
-        }
-        CVPixelBufferUnlockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let bitmap = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let context = CGContext(data: base, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: bitmap) else { return nil }
+
+        let w = CGFloat(width), h = CGFloat(height)
+        context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: w, height: h))
+
+        // UIKit draws with the origin at the top-left; flip the context so NSString.draw lands
+        // right side up in this bottom-left CVPixelBuffer.
+        UIGraphicsPushContext(context)
+        context.translateBy(x: 0, y: h)
+        context.scaleBy(x: 1, y: -1)
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineSpacing = 18
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.boldSystemFont(ofSize: 52),
+            .foregroundColor: UIColor.white,
+            .paragraphStyle: paragraph
+        ]
+        let text = "手机 CarPlay 未启动成功\n请检查 iPhone 上的 CarPlay" as NSString
+        text.draw(in: CGRect(x: 40, y: h * 0.34, width: w - 80, height: h * 0.34), withAttributes: attrs)
+        UIGraphicsPopContext()
+
         return buffer
     }
 

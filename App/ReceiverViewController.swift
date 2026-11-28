@@ -119,9 +119,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let appearanceControl = ChoiceMenu(items: ReceiverConfiguration.Appearance.allCases.map(\.title))
     /// CarPlay keys under the inline video.
     private let controlBar = UIStackView()
-    /// Direction pad under the CarPlay picture: this dashboard has no touch screen, so the menu
-    /// needs a knob the rider can operate from the phone.
-    private let directionPad = DirectionPad()
     private let secureBrowserURLLabel = UILabel()
     private let secureBrowserCopyButton = UIButton(type: .system)
     private let secureBrowserRow = UIStackView()
@@ -177,6 +174,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let cfmotoStaticPadQualityField = UITextField()
     private let cfmotoAllIntraSwitch = UISwitch()
     private let handlebarDoubleWindowField = UITextField()
+    private let handlebarTargetVolumeSlider = UISlider()
+    private let handlebarTargetVolumeLabel = UILabel()
     private let cfmotoTuningStatus = UILabel()
     private let cfmotoStatus = StatusLabel()
     /// Every EasyConn line in one scrollable, selectable field: a one-line label cannot be read or
@@ -428,7 +427,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let titleStack = UIStackView(arrangedSubviews: [heroIcon, heading])
         titleStack.axis = .horizontal; titleStack.alignment = .center; titleStack.spacing = 14
         let homeCredit = UILabel()
-        homeCredit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发。目前仅在 150SCF 实测通过，理论上支持 150SC / 150AUR；功能尚不完善，仅供测试使用。—— 150SCF 小马"
+        homeCredit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发，针对春风车型进行优化，其他品牌请使用原作者1.0.X的新版。\n目前仅在 150SCF 实测通过，\n   抖音:150SCF小马"
         homeCredit.font = .preferredFont(forTextStyle: .subheadline)
         homeCredit.textColor = .label
         homeCredit.textAlignment = .center
@@ -648,21 +647,16 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         fullscreenButton.isHidden = false; pictureInPictureButton.isHidden = false
         videoActions.tag = 8801
         stack.addArrangedSubview(videoActions)
-        directionPad.isHidden = true
-        directionPad.onPress = { [weak self] control, _ in
-            self?.receiver.press(control)
-        }
-        stack.addArrangedSubview(directionPad)
         Self.barControls.forEach { controlBar.addArrangedSubview(makeControlButton($0)) }
         controlBar.axis = .horizontal; controlBar.distribution = .fillEqually; controlBar.spacing = 8
         controlBar.isHidden = true
         stack.addArrangedSubview(controlBar)
         handlebarLogView.isEditable = false; handlebarLogView.isSelectable = true
-        handlebarLogView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        handlebarLogView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         handlebarLogView.backgroundColor = .secondarySystemBackground
         handlebarLogView.layer.cornerRadius = 8
         handlebarLogView.textContainerInset = UIEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
-        handlebarLogView.heightAnchor.constraint(equalToConstant: 260).isActive = true
+        handlebarLogView.heightAnchor.constraint(equalToConstant: 220).isActive = true
         logView.isEditable = false; logView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         logView.backgroundColor = .secondarySystemBackground; logView.layer.cornerRadius = 12
         logView.heightAnchor.constraint(equalToConstant: 220).isActive = true
@@ -709,7 +703,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                     self.clearStartupHint()
                     self.networkStartupTask?.cancel()
                     self.networkStartupTask = nil
-                    self.videoActions.isHidden = false; self.controlBar.isHidden = false; self.directionPad.isHidden = false
+                    self.videoActions.isHidden = false; self.controlBar.isHidden = false
                     self.log("视频已送入本机显示层")
                     if UIDevice.current.userInterfaceIdiom == .pad { self.showFullscreen() }
                     self.updatePictureInPicturePolicy()
@@ -828,9 +822,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self.statusLabel.text = "蓝牙广播已开启，正在等待 iPhone"
         }
         controlBrowser.onLog = { [weak self] in self?.log($0) }
-        // Handlebar probe: show every raw event, and keep it in the log so it survives a crash.
-        // `log` touches UIKit, so route it through main like the handlebar view: the volume
-        // observation can fire on a non-main thread.
+        // 车把按键：日志先回主线程（音量 KVO 可能在非主线程触发），再把识别出的控制交给 receiver。
         handlebarProbe.onLog = { [weak self] line in
             guard let self else { return }
             DispatchQueue.main.async {
@@ -838,8 +830,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 self.log(line)
             }
         }
-        // Once the probe holds Now Playing, its events also drive CarPlay.
         handlebarProbe.onControl = { [weak self] control in self?.receiver.press(control) }
+        // 总开关持久化：上次开启过，这次启动就自动生效。
+        if HandlebarProbe.isEnabled { handlebarProbe.start() }
+        // 双击延迟输入框 + 目标音量进度条（控件事件只注册一次）。
+        handlebarDoubleWindowField.addTarget(self, action: #selector(handlebarDoubleWindowChanged), for: .editingDidEnd)
+        handlebarTargetVolumeSlider.addTarget(self, action: #selector(handlebarTargetVolumeChanged), for: .valueChanged)
+        handlebarTargetVolumeSlider.addTarget(self, action: #selector(handlebarTargetVolumeSaved), for: [.touchUpInside, .touchUpOutside])
         receiverBrowser.onLog = { [weak self] in self?.log($0) }
         receiverBrowser.onTargets = { [weak self] targets in
             guard let self, !self.running, self.modeControl.selectedSegmentIndex == 2 else { return }
@@ -2019,7 +2016,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         screenAdaptation?.cancel(); screenAdaptation = nil
         reportedScreen = nil; primaryViewer = nil; pendingRestartReason = nil
         pictureInPicture.stop(); keepAlive.stop(); skippedLocalVideo = false
-        hideFullscreen(); videoActions.isHidden = true; controlBar.isHidden = true; directionPad.isHidden = true
+        hideFullscreen(); videoActions.isHidden = true; controlBar.isHidden = true
         displayedVideo = false; didRequestImmediatePiP = false
         videoSurface.reset(); inlineVideoContainer.isHidden = true
         receiver.onListening = nil; bluetooth.stop(); sameDevice.stop(); controlBrowser.stop(); receiver.stop()
@@ -2451,8 +2448,6 @@ extension ReceiverViewController {
         cfmotoBaselineSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         cfmotoStaticPadSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
         cfmotoAllIntraSwitch.addTarget(self, action: #selector(cfmotoTuningChanged), for: .valueChanged)
-        handlebarDoubleWindowField.keyboardType = .numberPad
-        handlebarDoubleWindowField.addTarget(self, action: #selector(handlebarDoubleWindowChanged), for: .editingDidEnd)
         syncCfMotoTuningFields()
         if let crash = CrashCatcher.previousException() {
             // The previous run died of an exception; that text is the only trace on a sideloaded build.
@@ -2843,7 +2838,11 @@ extension ReceiverViewController {
                         }
                     }) { [unowned self] in self.soundPage() },
                     .control("驾驶位", icon: ("steeringwheel", .systemTeal), driveControl),
-                    .page("车辆", icon: ("car.fill", .systemTeal)) { [unowned self] in self.vehiclePage() }
+                    .page("车辆", icon: ("car.fill", .systemTeal)) { [unowned self] in self.vehiclePage() },
+                    .page("车把按键", icon: ("dot.radiowaves.left.and.right", .systemIndigo),
+                          detail: { [weak self] in self?.handlebarProbe.isRunning == true ? "已开启" : "已关闭" }) { [weak self] in
+                        self?.handlebarPage() ?? UIViewController()
+                    }
                 ]),
                 SettingsSection("后台与画中画", footer: "锁屏前，请在 iPhone「设置 › 通用 › CarPlay › CarWithin」中打开「锁定时允许 CarPlay」。后台运行会增加耗电。画中画仅显示实时画面。离开 App 时自动开启需打开 iPhone「设置 › 通用 › 画中画」中的自动选项。", [
                     .control("锁屏与后台继续运行", icon: ("lock.fill", .systemPurple), keepAliveSwitch),
@@ -3300,6 +3299,11 @@ extension ReceiverViewController {
     private func cfmotoOutputSections() -> [SettingsSection] {
         // Repopulate from the file so a log from an earlier session is visible too.
         reloadCfMotoLog()
+        let ipHint = UILabel()
+        ipHint.text = "春风车机IP默认为192.168.0.1或192.168.49.1  端口测试不通过请尝试更换车机IP 并关闭春风官方APP后台"
+        ipHint.font = .preferredFont(forTextStyle: .footnote)
+        ipHint.textColor = .systemOrange
+        ipHint.numberOfLines = 0
         return [
             SettingsSection("春风 EasyConn（MotoPlay）",
                 footer: "iPhone 先加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面后再启动 CarPlay。" +
@@ -3316,7 +3320,8 @@ extension ReceiverViewController {
                             icon: cfmotoTestPatternActive ? ("stop.fill", .systemRed) : ("play.fill", .systemGreen),
                             enabled: cfmotoPortTestPassed) { [weak self] in
                         self?.toggleCfMotoTestPattern()
-                    }
+                    },
+                    .view(ipHint)
                 ]),
             // 「画面参数（手动覆盖）」已隐藏：本分支固定 6 Mbps / 30 fps / Baseline 3.1，静止降节奏关闭。
             SettingsSection("连接状态", footer: "日志同时写入 Documents/CarWithin-easyconn.log，崩溃或强退都不会丢。车边测试推荐直接「分享日志文件」，可 AirDrop / 微信 / 存到「文件」。", [
@@ -3490,10 +3495,7 @@ extension ReceiverViewController {
         var sections = [SettingsSection("实验性功能", footer: "检查这台 iPhone 是否允许 App 发布本机 iAP2 配件端点（本机 CarPlay 的前提）。CarPlay 运行中不能测试。", [
             .action("测试本机传输能力", icon: ("checkmark.shield.fill", .systemPink), detail: { [unowned self] in self.statusLabel.text }) { [unowned self] in
                 self.testSameDeviceTransport()
-            },
-            .page("车把按键探测", icon: ("dot.radiowaves.left.and.right", .systemIndigo), detail: { [unowned self] in
-                self.handlebarProbe.count == 0 ? "未收到" : "\(self.handlebarProbe.count) 条"
-            }) { [unowned self] in self.handlebarProbePage() }
+            }
         ])]
         if UIDevice.current.userInterfaceIdiom == .pad {
             sections.append(SettingsSection("iPad 模式", footer: "接收其他 iPhone 的 CarPlay，或把这台设备的 CarPlay 投送到另一台 iPad。", [.view(modeControl)]))
@@ -3506,38 +3508,18 @@ extension ReceiverViewController {
         return sections
     }
 
-    // MARK: 车把按键探测
+    // MARK: 车把按键
 
-    /// Observe-only page: it reports what the bike's Bluetooth module actually sends.
-    ///
-    /// The 150SCF's dash is non-touch, so its ▲▼ arrive as absolute-volume steps and its enter key as
-    /// AVRCP play/pause. What the firmware emits is undocumented, so this records the raw events and
-    /// the mapping is decided afterwards instead of guessed.
-    fileprivate func handlebarProbePage() -> SettingsPageController {
-        page("车把按键探测") { [unowned self] in
-            let running = self.handlebarProbe.isRunning
-            let claim = self.handlebarProbe.isNowPlaying
-            var sections: [SettingsSection] = [
-                SettingsSection(footer: "只观察、不映射。车把按键是蓝牙 AVRCP，不走 Wi-Fi 投屏链路。iPhone 只把传输键交给「正在播放」的 App。▲▼ 单击/双击走音量通道，锁屏、音乐播放中都可用；SET 与 ▲▼ 长按是传输键，音乐播放时归音乐 App。默认只用 4 个音量手势，无需「接管正在播放」。", [
-                    .action(running ? "停止探测" : "开始探测",
-                            icon: (running ? "stop.circle.fill" : "play.circle.fill", running ? .systemRed : .systemGreen)) {
-                        if running { self.handlebarProbe.stop() } else { self.handlebarProbe.start() }
-                        self.reloadVisibleSettings()
-                    },
-                    .action(claim ? "已接管正在播放（点此释放）" : "接管正在播放（收得到按键的前提）",
-                            icon: ("music.note.list", .systemPurple)) {
-                        if claim {
-                            self.handlebarProbe.stop()
-                            self.handlebarProbe.start()
-                        } else if !self.handlebarProbe.becomeNowPlaying() {
-                            self.alert("接管失败", "无法取得音频会话。请确认蓝牙音频路由正常后重试。")
-                        }
-                        self.reloadVisibleSettings()
-                    }
-                ]),
+    private func handlebarPage() -> SettingsPageController {
+        // 进入页面时把已累积的日志刷到只读视图：启动即自动运行时，日志是在视图
+        // 还没挂到窗口前产生的，不主动刷一次，首次打开会一直空着。
+        handlebarLogView.text = handlebarLines.joined(separator: "\n")
+        return page("车把按键") { [unowned self] in
+            [
+                self.handlebarTargetVolumeSection(),
                 self.handlebarMappingSection(),
                 self.handlebarTimingSection(),
-                SettingsSection(footer: "记录下来发给开发者即可排查。", [
+                SettingsSection(footer: "锁屏时车把音量键的原始记录，排查用。", [
                     .view(self.handlebarLogView),
                     .action("复制记录", icon: ("doc.on.doc", .systemBlue)) {
                         UIPasteboard.general.string = self.handlebarLogView.text
@@ -3545,104 +3527,126 @@ extension ReceiverViewController {
                     .action("清空", icon: ("trash", .systemGray), destructive: true) {
                         self.handlebarLines.removeAll()
                         self.handlebarLogView.text = ""
-                        self.reloadVisibleSettings()
                     }
                 ])
             ]
-            if !running {
-                sections.insert(SettingsSection(footer: "探测未运行。点「开始探测」后按车把按键。", []), at: 0)
-            }
-            return sections
         }
     }
 
-    /// One row per gesture, each a pull-down of the actions it can send to CarPlay.
-    ///
-    /// Gestures are named for what the bike does, because the same button behaves differently
-    /// depending on how long it is held (see HandlebarProbe): a short ▲▼ is a volume step, a held one
-    /// is a track key. The row for a gesture the dash never delivers says so instead of looking broken.
-    private func handlebarMappingSection() -> SettingsSection {
-        let rows: [SettingsRow] = HandlebarGesture.allCases.map { gesture in
-            let current = HandlebarMapping.action(for: gesture)
-            let menu = ChoiceMenu(items: HandlebarAction.allCases.map(\.title))
-            menu.selectedSegmentIndex = HandlebarAction.allCases.firstIndex(of: current) ?? 0
-            menu.isEnabled = !gesture.isUnavailable
-            menu.tag = Self.handlebarGestureTag(gesture)
-            menu.addTarget(self, action: #selector(handlebarGestureChanged(_:)), for: .valueChanged)
-            var row = SettingsRow.control(gesture.title, icon: ("hand.tap", .systemIndigo), menu)
-            if gesture.isUnavailable { row.subtitle = { "车机自己消费这个按键，手机收不到" } }
-            return row
-        }
-        return SettingsSection("按键映射", footer: "左边是车把动作，右边是要发给 CarPlay 的操作。默认只用 ▲▼ 单击/双击这 4 个音量手势（自动拨回音量）；SET 长按与 ▲▼ 长按是传输键，音乐播放时归音乐 App，默认「不执行」；SET 短按/双击与 BACK 被车机自己占用，手机收不到。", rows)
-    }
-
-    /// How long a double is, and whether a held arrow keeps scrolling.
-    private func handlebarTimingSection() -> SettingsSection {
-        handlebarDoubleWindowField.text = "\(Int((HandlebarMapping.doubleTapWindow * 1000).rounded()))"
-        let repeatSwitch = UISwitch()
-        repeatSwitch.isOn = HandlebarMapping.repeatsWhenHeld
-        repeatSwitch.addAction(UIAction { [weak self] _ in
-            HandlebarMapping.repeatsWhenHeld = repeatSwitch.isOn
-            self?.log("车把长按连发：\(repeatSwitch.isOn ? "开" : "关")")
+    private func handlebarTargetVolumeSection() -> SettingsSection {
+        let toggle = UISwitch()
+        toggle.isOn = handlebarProbe.isRunning
+        toggle.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            if toggle.isOn { self.handlebarProbe.start() } else { self.handlebarProbe.stop() }
+            HandlebarProbe.isEnabled = toggle.isOn
+            self.reloadVisibleSettings()
         }, for: .valueChanged)
 
-        return SettingsSection("手势与时序", footer: "双击窗口（毫秒）：两次按键隔多久仍算「双击」。填小一点单击更跟手，但双击要按得更快；范围 100–2000。长按连发只影响映射为上一项/下一项的长按。", [
-            .field("双击窗口（毫秒）", handlebarDoubleWindowField, placeholder: "200"),
-            .control("长按连发", icon: ("arrow.triangle.2.circlepath", .systemGreen), repeatSwitch),
-            .action("恢复默认映射", icon: ("arrow.counterclockwise", .systemGray), destructive: true) { [weak self] in
-                HandlebarMapping.reset()
-                self?.log("车把映射已恢复默认")
-                self?.reloadVisibleSettings()
-            }
-        ])
+        let lockOnly = UISwitch()
+        lockOnly.isOn = HandlebarProbe.lockOnly
+        lockOnly.addAction(UIAction { _ in
+            HandlebarProbe.lockOnly = lockOnly.isOn
+        }, for: .valueChanged)
+
+        let slider = handlebarTargetVolumeSlider
+        slider.minimumValue = 10
+        slider.maximumValue = 100
+        let stepped = Int((Float(HandlebarProbe.targetVolumePercent) / 10).rounded()) * 10
+        slider.value = Float(max(10, stepped))
+        handlebarTargetVolumeLabel.text = "目标音量：" + "\(Int(slider.value))%"
+        handlebarTargetVolumeLabel.font = .preferredFont(forTextStyle: .footnote)
+        handlebarTargetVolumeLabel.textColor = .secondaryLabel
+
+        let restoreModes = VolumeRestore.allCases
+        let restoreMenu = ChoiceMenu(items: restoreModes.map(\.title))
+        restoreMenu.selectedSegmentIndex = restoreModes.firstIndex(of: VolumeRestore.selected) ?? 0
+        restoreMenu.addAction(UIAction { _ in
+            VolumeRestore.selected = restoreModes[restoreMenu.selectedSegmentIndex]
+        }, for: .valueChanged)
+
+        let carplayHint = UILabel()
+        carplayHint.text = "提示：只有 CarPlay 成功启动后，车把按键才接管音量键；CarPlay 未启动时，音量键仍是普通音量调节。"
+        carplayHint.font = .preferredFont(forTextStyle: .footnote)
+        carplayHint.textColor = .systemOrange
+        carplayHint.numberOfLines = 0
+
+        return SettingsSection("开关与目标音量",
+            footer: "开启后保存状态，App 下次启动自动生效。每次手势判定后，音量拨回一次下面的目标值。「锁屏才生效」关闭时，不锁屏也会把音量键当车把按键。", [
+                .control("启用车把按键控制", icon: ("hand.tap", .systemGreen), toggle),
+                .control("锁屏才生效", icon: ("lock.fill", .systemPurple), lockOnly),
+                .control("目标音量", icon: ("speaker.wave.2.fill", .systemOrange), slider),
+                .control("拨回方式", icon: ("arrow.uturn.backward", .systemBlue), restoreMenu),
+                .note(handlebarTargetVolumeLabel),
+                .view(carplayHint)
+            ])
     }
 
-    private static func handlebarGestureTag(_ gesture: HandlebarGesture) -> Int {
-        9100 + (HandlebarGesture.allCases.firstIndex(of: gesture) ?? 0)
-    }
-    private static func handlebarGesture(from tag: Int) -> HandlebarGesture? {
-        let index = tag - 9100
-        return HandlebarGesture.allCases.indices.contains(index) ? HandlebarGesture.allCases[index] : nil
-    }
-
-    @objc private func handlebarGestureChanged(_ sender: ChoiceMenu) {
-        guard let gesture = Self.handlebarGesture(from: sender.tag) else { return }
-        let index = sender.selectedSegmentIndex
-        guard HandlebarAction.allCases.indices.contains(index) else { return }
-        let action = HandlebarAction.allCases[index]
-        HandlebarMapping.set(action, for: gesture)
-        log("车把映射：\(gesture.title) → \(action.title)")
-    }
-
-    @objc private func handlebarDoubleWindowChanged() {
-        let text = (handlebarDoubleWindowField.text ?? "").trimmingCharacters(in: .whitespaces)
-        guard let ms = Double(text), ms.isFinite else {
-            syncHandlebarDoubleWindowField()
-            return
+    private func handlebarMappingSection() -> SettingsSection {
+        let gestures: [HandlebarGesture] = [.arrowUpShort, .arrowDownShort, .arrowUpDouble, .arrowDownDouble]
+        let actions = HandlebarAction.allCases
+        let rows: [SettingsRow] = gestures.map { gesture in
+            let current = HandlebarMapping.action(for: gesture)
+            let menu = ChoiceMenu(items: actions.map(\.title))
+            menu.selectedSegmentIndex = actions.firstIndex(of: current) ?? 0
+            menu.addAction(UIAction { [weak self] _ in
+                guard self != nil else { return }
+                HandlebarMapping.set(actions[menu.selectedSegmentIndex], for: gesture)
+            }, for: .valueChanged)
+            return .control(gesture.title, icon: ("command", .systemIndigo), menu)
         }
-        let clamped = min(2000, max(100, ms))
-        HandlebarMapping.doubleTapWindow = clamped / 1000
-        log("双击窗口：\(Int(clamped.rounded())) 毫秒")
-        syncHandlebarDoubleWindowField()
+        return SettingsSection("按键映射",
+            footer: "左边是车把动作，右边是要发给 CarPlay 的操作。默认：▲▼单击切换菜单、▲双击确认、▼双击返回。改动下次按键立即生效。", rows)
     }
 
-    private func syncHandlebarDoubleWindowField() {
-        handlebarDoubleWindowField.text = "\(Int((HandlebarMapping.doubleTapWindow * 1000).rounded()))"
+    private func handlebarTimingSection() -> SettingsSection {
+        handlebarDoubleWindowField.keyboardType = .numberPad
+        handlebarDoubleWindowField.textAlignment = .right
+        handlebarDoubleWindowField.text = String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000)
+        handlebarDoubleWindowField.placeholder = "280"
+        return SettingsSection("双击延迟",
+            footer: "两次按键间隔小于这个时间就算双击，单位毫秒。默认 280 毫秒，改大更容易出双击。", [
+                .field("双击间隔（毫秒）", handlebarDoubleWindowField, placeholder: "280"),
+                .action("恢复默认映射与延迟", icon: ("arrow.counterclockwise", .systemGray)) { [weak self] in
+                    HandlebarMapping.reset()
+                    self?.reloadVisibleSettings()
+                }
+            ])
     }
 
     private func appendHandlebarLine(_ line: String) {
-        guard Thread.isMainThread else { DispatchQueue.main.async { [weak self] in self?.appendHandlebarLine(line) }; return }
-        let stamp = Self.handlebarStamp.string(from: Date())
-        handlebarLines.append("\(stamp) \(line)")
-        if handlebarLines.count > 200 { handlebarLines.removeFirst(handlebarLines.count - 200) }
-        handlebarLogView.text = handlebarLines.joined(separator: "\n")
-        handlebarLogView.scrollRangeToVisible(NSRange(location: (handlebarLogView.text as NSString).length, length: 0))
-    }
-    private static let handlebarStamp: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss.SSS"
-        return formatter
-    }()
+        let stamp = formatter.string(from: Date())
+        handlebarLines.append("\(stamp)  \(line)")
+        if handlebarLines.count > 120 { handlebarLines.removeFirst(handlebarLines.count - 120) }
+        if handlebarLogView.window != nil {
+            handlebarLogView.text = handlebarLines.joined(separator: "\n")
+            if !handlebarLogView.text.isEmpty {
+                handlebarLogView.scrollRangeToVisible(NSRange(location: handlebarLogView.text.utf16.count - 1, length: 1))
+            }
+        }
+    }
+
+    @objc private func handlebarDoubleWindowChanged() {
+        let raw = handlebarDoubleWindowField.text?.replacingOccurrences(of: ",", with: ".") ?? ""
+        if let ms = Double(raw.trimmingCharacters(in: .whitespaces)), ms >= 100, ms <= 1000 {
+            HandlebarMapping.doubleTapWindow = ms / 1000
+        }
+        handlebarDoubleWindowField.text = String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000)
+    }
+
+    @objc private func handlebarTargetVolumeChanged() {
+        let stepped = Int((handlebarTargetVolumeSlider.value / 10).rounded()) * 10
+        handlebarTargetVolumeLabel.text = "目标音量：" + "\(stepped)%"
+    }
+
+    @objc private func handlebarTargetVolumeSaved() {
+        let stepped = max(10, Int((handlebarTargetVolumeSlider.value / 10).rounded()) * 10)
+        handlebarTargetVolumeSlider.value = Float(stepped)
+        HandlebarProbe.targetVolumePercent = stepped
+        handlebarTargetVolumeLabel.text = "目标音量：" + "\(stepped)%（已保存）"
+    }
 
     private func diagnosticsSection() -> SettingsSection {
         var system = utsname(); uname(&system)
@@ -3698,7 +3702,7 @@ extension ReceiverViewController {
         version.textColor = .secondaryLabel
         version.adjustsFontForContentSizeCategory = true
         let credit = UILabel()
-        credit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发。目前仅在 150SCF 实测通过，理论上支持 150SC / 150AUR；功能尚不完善，仅供测试使用。—— 150SCF 小马"
+        credit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发，针对春风车型进行优化，其他品牌请使用原作者1.0.X的新版。\n目前仅在 150SCF 实测通过，\n   抖音:150SCF小马"
         credit.font = .preferredFont(forTextStyle: .caption1)
         credit.textColor = .tertiaryLabel
         credit.textAlignment = .center

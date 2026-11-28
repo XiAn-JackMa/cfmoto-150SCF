@@ -36,6 +36,9 @@ final class CfMotoLogStore {
         fileURL = documents?.appendingPathComponent("CarWithin-easyconn.log")
         guard let fileURL else { return }
 
+        // 只保留 48 小时内的日志，更早的删掉，避免旧文件一直占空间。
+        Self.removeStaleLogs(at: fileURL)
+
         // Rotate once so a long ride cannot fill the phone.
         if let size = try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int,
            size > maximumFileBytes {
@@ -58,6 +61,19 @@ final class CfMotoLogStore {
     }
 
     deinit { try? handle?.close() }
+
+    /// Deletes the log file and its rotated copy when their last modification is older than 48 hours.
+    /// Called at startup, before rotation, so stale field-test logs do not accumulate on the phone.
+    private static func removeStaleLogs(at fileURL: URL) {
+        let stale: TimeInterval = 48 * 60 * 60
+        let previous = fileURL.deletingPathExtension().appendingPathExtension("log.1")
+        for url in [fileURL, previous] {
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let modified = attributes[.modificationDate] as? Date,
+                  Date().timeIntervalSince(modified) > stale else { continue }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
 
     /// Device and build context, so a log sent from a phone identifies itself.
     static func environment() -> String {
