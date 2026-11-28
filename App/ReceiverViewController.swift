@@ -339,6 +339,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private static let releasesURL = projectURL.appendingPathComponent("releases")
     private static let supportURL = URL(string: "https://qr.alipay.com/fkx16608y1puemmltuocze0")!
     private static let authorURL = URL(string: "https://v.douyin.com/x64M2NbYj0A/")!
+    private static let outputSupportURL = URL(string: "https://qr.alipay.com/fkx10645kpvdtzpiis4zzac")!
+    private static let outputAuthorURL = URL(string: "https://v.douyin.com/O5t53whlfhQ")!
     private var lines: [String] = []
     private var launchedTransportTest = false
 
@@ -427,7 +429,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let titleStack = UIStackView(arrangedSubviews: [heroIcon, heading])
         titleStack.axis = .horizontal; titleStack.alignment = .center; titleStack.spacing = 14
         let homeCredit = UILabel()
-        homeCredit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发，针对春风车型进行优化，其他品牌请使用原作者1.0.X的新版。\n目前仅在 150SCF 实测通过，\n   抖音:150SCF小马"
+        homeCredit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发，针对春风车型进行优化，其他品牌请使用原作者1.0.X的新版。\n目前仅在 150SCF 实测通过.     抖音:150SCF小马"
         homeCredit.font = .preferredFont(forTextStyle: .subheadline)
         homeCredit.textColor = .label
         homeCredit.textAlignment = .center
@@ -3204,7 +3206,16 @@ extension ReceiverViewController {
             case .cfmoto:
                 sections = cfmotoOutputSections()
             }
-            return sections
+            return sections + [
+                SettingsSection("支持作者", footer: "觉得好用的话，关注抖音或请作者抽包利群。", [
+                    .externalLink("抖音", icon: ("heart.fill", .systemRed), detail: "关注修改者") {
+                        UIApplication.shared.open(Self.outputAuthorURL)
+                    },
+                    .externalLink("请抽利群", icon: ("cup.and.saucer.fill", .systemOrange), detail: "支付宝") {
+                        UIApplication.shared.open(Self.outputSupportURL)
+                    }
+                ])
+            ]
         }
     }
 
@@ -3702,7 +3713,7 @@ extension ReceiverViewController {
         version.textColor = .secondaryLabel
         version.adjustsFontForContentSizeCategory = true
         let credit = UILabel()
-        credit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发，针对春风车型进行优化，其他品牌请使用原作者1.0.X的新版。\n目前仅在 150SCF 实测通过，\n   抖音:150SCF小马"
+        credit.text = "基于开源项目 CarWithin & OpenCfMoto-ios，借助 DeepSeek 二次开发，针对春风车型进行优化，其他品牌请使用原作者1.0.X的新版。\n目前仅在 150SCF 实测通过.     抖音:150SCF小马"
         credit.font = .preferredFont(forTextStyle: .caption1)
         credit.textColor = .tertiaryLabel
         credit.textAlignment = .center
