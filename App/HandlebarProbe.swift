@@ -50,6 +50,15 @@ final class HandlebarProbe: @unchecked Sendable {
     /// 目标音量换算成 0…1。
     static var targetVolume: Float { Float(targetVolumePercent) / 100 }
 
+    /// 锁屏才生效：开（默认）时只有设备锁屏音量键才当车把按键；关时不锁屏也生效。
+    static var lockOnly: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "easyConnHandlebarLockOnly") == nil { return true }
+            return UserDefaults.standard.bool(forKey: "easyConnHandlebarLockOnly")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "easyConnHandlebarLockOnly") }
+    }
+
     // MARK: 状态
 
     private var volumeObservation: NSKeyValueObservation?
@@ -181,9 +190,9 @@ final class HandlebarProbe: @unchecked Sendable {
             guard let self, let old = change.oldValue, let new = change.newValue, old != new else { return }
             // 回声过滤：new 落在目标音量附近（半格内），就是自己刚拨回的那次，忽略。
             if abs(new - Self.targetVolume) < 0.032 { return }
-            // 没锁屏：音量键就是正常调音量，不触发、不拨回。
+            // 锁屏才生效开关：开时未锁屏就正常调音量；关时不锁屏也当车把按键。
             self.lock.lock(); let locked = self.screenLocked; self.lock.unlock()
-            guard locked else {
+            if Self.lockOnly && !locked {
                 self.onLog?("[音量] 未锁屏：音量键正常调音量（\(Int(new * 100))%），不触发车把")
                 return
             }
@@ -191,31 +200,23 @@ final class HandlebarProbe: @unchecked Sendable {
             self.record(new > old ? "音量+" : "音量−",
                         String(format: "%.0f%% → %.0f%%（%.3f，约 %d 格）", old * 100, new * 100, steps,
                                Int((steps * 16).rounded())))
-            self.handleVolume(direction: new > old ? 1 : -1, steps: steps)
+            self.handleVolume(direction: new > old ? 1 : -1)
         }
     }
 
     // MARK: 手势识别
 
-    /// ▲/▼ 音量步进。一次 ≥0.075 的跳变是固件把快速双击合并成的一大步，直接判双击；
-    /// 否则第一次按下先憋住，双击窗口内来了第二次就判双击，窗口结束没有第二次才判单击。
-    private func handleVolume(direction: Int, steps: Float) {
+    /// ▲/▼ 音量步进。双击判定纯按时间间隔：同方向第二次落在双击窗口内即双击，
+    /// 否则第一次先憋住，窗口结束没有第二次才判单击。
+    /// 注意步进大小随音量区间变化（低位一档 2 格、高位一档 1 格），不能拿步进当双击信号。
+    private func handleVolume(direction: Int) {
         // 无论是否触发手势，都先把音量拨回目标值。
         restoreToTargetVolume()
         guard onControl != nil else { return }
         let now = Date()
 
-        if steps >= 0.075 {
-            // 固件合并了快速双击。
-            cancelPendingSingle(direction)
-            lastArrow[direction] = nil
-            onLog?("[手势] 步进 \(String(format: "%.3f", steps)) ≥ 0.075，固件已合并 → 双击")
-            fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
-            return
-        }
-
         if let last = lastArrow[direction], now.timeIntervalSince(last) < HandlebarMapping.doubleTapWindow {
-            // 双击窗口内的第二次：慢双击。
+            // 双击窗口内的第二次：双击。
             cancelPendingSingle(direction)
             lastArrow[direction] = nil
             onLog?("[手势] 与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last) * 1000))ms → 双击（取消单击）")

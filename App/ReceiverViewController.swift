@@ -2837,6 +2837,12 @@ extension ReceiverViewController {
             self.reloadVisibleSettings()
         }, for: .valueChanged)
 
+        let lockOnly = UISwitch()
+        lockOnly.isOn = HandlebarProbe.lockOnly
+        lockOnly.addAction(UIAction { _ in
+            HandlebarProbe.lockOnly = lockOnly.isOn
+        }, for: .valueChanged)
+
         let slider = handlebarTargetVolumeSlider
         slider.minimumValue = 1
         slider.maximumValue = 100
@@ -2846,8 +2852,9 @@ extension ReceiverViewController {
         handlebarTargetVolumeLabel.textColor = .secondaryLabel
 
         return SettingsSection(CWL("开关与目标音量"),
-            footer: CWL("开启后保存状态，App 下次启动自动生效。锁屏后每次按键，音量都会立刻拨回下面的目标值。"), [
+            footer: CWL("开启后保存状态，App 下次启动自动生效。锁屏后每次按键，音量都会立刻拨回下面的目标值。「锁屏才生效」关闭时，不锁屏也会把音量键当车把按键。"), [
                 .control(CWL("启用车把按键控制"), icon: ("hand.tap", .systemGreen), toggle),
+                .control(CWL("锁屏才生效"), icon: ("lock.fill", .systemPurple), lockOnly),
                 .control(CWL("目标音量"), icon: ("speaker.wave.2.fill", .systemOrange), slider),
                 .note(handlebarTargetVolumeLabel)
             ])
