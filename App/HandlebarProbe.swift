@@ -108,10 +108,8 @@ final class HandlebarProbe: @unchecked Sendable {
         guard !isRunning else { return }
         isRunning = true
         lock.lock()
-        // 锁屏/后台都可作为「骑行中」的信号。isProtectedDataAvailable 在 App 未启用
-        // Data Protection 时始终为 true，因此再叠加 applicationState == .background 兜底。
-        screenLocked = UIApplication.shared.applicationState == .background
-            || !UIApplication.shared.isProtectedDataAvailable
+        // 只用数据保护状态判断锁屏；不用 applicationState（切到别的 App 也是后台，会误判）。
+        screenLocked = !UIApplication.shared.isProtectedDataAvailable
         lock.unlock()
         observeLockState()
         // 拨回主用私有 API（AVSystemController，车机路径下也能写）；MPVolumeView 仅作
@@ -140,27 +138,14 @@ final class HandlebarProbe: @unchecked Sendable {
         onLog?("[车把] 已停用")
     }
 
-    // MARK: 锁屏 / 后台
+    // MARK: 锁屏
 
     private func observeLockState() {
         removeLockObservers()
         let center = NotificationCenter.default
+        // 只用 Data Protection 通知判断锁屏：它精确对应「设备锁屏/解锁」，
+        // 不像 didEnterBackground 会把「切到别的 App（设备未锁屏）」误判成锁屏。
         lockObservers = [
-            // 进后台（锁屏、切 App）→ 当作骑行中，音量键开始驱动 CarPlay。
-            center.addObserver(forName: UIApplication.didEnterBackgroundNotification,
-                               object: nil, queue: .main) { [weak self] _ in
-                guard let self else { return }
-                self.lock.lock(); self.screenLocked = true; self.lock.unlock()
-                self.onLog?("[车把] 已进入后台：音量键开始当作车把按键")
-            },
-            // 回前台（解锁、切回）→ 音量键恢复正常调音量。
-            center.addObserver(forName: UIApplication.willEnterForegroundNotification,
-                               object: nil, queue: .main) { [weak self] _ in
-                guard let self else { return }
-                self.lock.lock(); self.screenLocked = false; self.lock.unlock()
-                self.onLog?("[车把] 已回前台：音量键恢复正常调音量")
-            },
-            // 若 App 启用了 Data Protection，锁屏/解锁会更精确，也一并监听。
             center.addObserver(forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
                                object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
@@ -198,7 +183,10 @@ final class HandlebarProbe: @unchecked Sendable {
             if abs(new - Self.targetVolume) < 0.032 { return }
             // 没锁屏：音量键就是正常调音量，不触发、不拨回。
             self.lock.lock(); let locked = self.screenLocked; self.lock.unlock()
-            guard locked else { return }
+            guard locked else {
+                self.onLog?("[音量] 未锁屏：音量键正常调音量（\(Int(new * 100))%），不触发车把")
+                return
+            }
             let steps = abs(new - old)
             self.record(new > old ? "音量+" : "音量−",
                         String(format: "%.0f%% → %.0f%%（%.3f，约 %d 格）", old * 100, new * 100, steps,
