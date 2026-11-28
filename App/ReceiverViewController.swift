@@ -2808,7 +2808,10 @@ extension ReceiverViewController {
     // MARK: - 车把按键
 
     private func handlebarPage() -> SettingsPageController {
-        page(CWL("车把按键")) { [unowned self] in
+        // 进入页面时把已累积的日志刷到只读视图：启动即自动运行时，日志是在视图
+        // 还没挂到窗口前产生的，不主动刷一次，首次打开会一直空着。
+        handlebarLogView.text = handlebarLines.joined(separator: "\n")
+        return page(CWL("车把按键")) { [unowned self] in
             [
                 self.handlebarTargetVolumeSection(),
                 self.handlebarMappingSection(),
@@ -2851,11 +2854,19 @@ extension ReceiverViewController {
         handlebarTargetVolumeLabel.font = .preferredFont(forTextStyle: .footnote)
         handlebarTargetVolumeLabel.textColor = .secondaryLabel
 
+        let restoreModes = VolumeRestore.allCases
+        let restoreMenu = ChoiceMenu(items: restoreModes.map(\.title))
+        restoreMenu.selectedSegmentIndex = restoreModes.firstIndex(of: VolumeRestore.selected) ?? 0
+        restoreMenu.addAction(UIAction { _ in
+            VolumeRestore.selected = restoreModes[restoreMenu.selectedSegmentIndex]
+        }, for: .valueChanged)
+
         return SettingsSection(CWL("开关与目标音量"),
-            footer: CWL("开启后保存状态，App 下次启动自动生效。锁屏后每次按键，音量都会立刻拨回下面的目标值。「锁屏才生效」关闭时，不锁屏也会把音量键当车把按键。"), [
+            footer: CWL("开启后保存状态，App 下次启动自动生效。每次手势判定后，音量拨回一次下面的目标值。「锁屏才生效」关闭时，不锁屏也会把音量键当车把按键。"), [
                 .control(CWL("启用车把按键控制"), icon: ("hand.tap", .systemGreen), toggle),
                 .control(CWL("锁屏才生效"), icon: ("lock.fill", .systemPurple), lockOnly),
                 .control(CWL("目标音量"), icon: ("speaker.wave.2.fill", .systemOrange), slider),
+                .control(CWL("拨回方式"), icon: ("arrow.uturn.backward", .systemBlue), restoreMenu),
                 .note(handlebarTargetVolumeLabel)
             ])
     }

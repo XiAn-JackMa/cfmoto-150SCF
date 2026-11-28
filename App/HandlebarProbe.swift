@@ -23,6 +23,38 @@ struct HandlebarRawSample: Identifiable, Sendable, Equatable {
     let detail: String
 }
 
+/// 拨回音量的方式（用户可选，设置页持久化）。
+enum VolumeRestore: String, CaseIterable {
+    /// 依次尝试：私有 API → MPVolumeSlider → MPVolumeView，哪个成功用哪个。
+    case auto
+    /// AVSystemController.setVolumeTo:forCategory:（车机路径有效，已实测）。
+    case privateAPI
+    /// 直接实例化私有类 MPVolumeSlider，绕过 MPVolumeView 的「车机路径隐藏滑块」。
+    case mpVolumeSlider
+    /// 官方 MPVolumeView 里找 UISlider（非车机路径有效）。
+    case mpVolumeView
+
+    var title: String {
+        switch self {
+        case .auto: return "自动（推荐）"
+        case .privateAPI: return "私有 API"
+        case .mpVolumeSlider: return "MPVolumeSlider"
+        case .mpVolumeView: return "MPVolumeView"
+        }
+    }
+
+    /// 持久化的当前选择。
+    static var selected: VolumeRestore {
+        get {
+            let key = "easyConnHandlebarRestoreMode"
+            guard let raw = UserDefaults.standard.string(forKey: key),
+                  let mode = VolumeRestore(rawValue: raw) else { return .auto }
+            return mode
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "easyConnHandlebarRestoreMode") }
+    }
+}
+
 final class HandlebarProbe: @unchecked Sendable {
     /// 每观察到一条事件就回调（主线程）。
     var onSample: ((HandlebarRawSample) -> Void)?
@@ -74,29 +106,22 @@ final class HandlebarProbe: @unchecked Sendable {
 
     /// 拨回音量用的离屏 MPVolumeView：只有挂到窗口，slider 写值才会真的改变系统音量。
     private var volumeView: MPVolumeView?
+    /// 直接实例化的私有 MPVolumeSlider（拨回方式=MPVolumeSlider 时复用）。
+    private var volumeSlider: UISlider?
 
     // 日志环
     private let lock = NSLock()
     private var samples: [HandlebarRawSample] = []
-    private var eventSequence = 0
-    private var lastEventAt: Date?
 
     // MARK: 日志
 
     private func record(_ source: String, _ detail: String = "") {
-        let now = Date()
-        let seq: Int
-        let delta: String
+        let sample = HandlebarRawSample(date: Date(), source: source, detail: detail)
         lock.lock()
-        eventSequence += 1
-        seq = eventSequence
-        delta = lastEventAt.map { String(format: "+%.0fms", now.timeIntervalSince($0) * 1000) } ?? "首个"
-        lastEventAt = now
-        let sample = HandlebarRawSample(date: now, source: source, detail: detail)
         samples.append(sample)
         if samples.count > 60 { samples.removeFirst(samples.count - 60) }
         lock.unlock()
-        onLog?("[按键 #\(seq) \(delta)] \(source)\(detail.isEmpty ? "" : " · \(detail)")")
+        onLog?("\(source)\(detail.isEmpty ? "" : " · \(detail)")")
         DispatchQueue.main.async { [weak self] in self?.onSample?(sample) }
     }
 
@@ -121,16 +146,13 @@ final class HandlebarProbe: @unchecked Sendable {
         screenLocked = !UIApplication.shared.isProtectedDataAvailable
         lock.unlock()
         observeLockState()
-        // 拨回主用私有 API（AVSystemController，车机路径下也能写）；MPVolumeView 仅作
-        // 非车机路径的备用。延迟到下一轮 runloop 备用挂窗。
+        // 备用挂窗（自动 / MPVolumeView 模式需要）；私有 API 模式用不到。
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let hasPrivateAPI = NSClassFromString("AVSystemController") != nil
             _ = self.ensureVolumeView()
-            self.onLog?("[车把] 拨回方式：私有 API \(hasPrivateAPI ? "可用" : "不可用")，MPVolumeView 备用")
         }
         startVolumeObservation()
-        onLog?("[车把] 已启用：锁屏/后台时音量键＝车把按键，目标音量 \(Self.targetVolumePercent)%")
+        onLog?("[车把] 已启用：目标音量 \(Self.targetVolumePercent)% · 拨回方式=\(VolumeRestore.selected.title)")
     }
 
     func stop() {
@@ -143,6 +165,7 @@ final class HandlebarProbe: @unchecked Sendable {
         lastArrow.removeAll()
         volumeView?.removeFromSuperview()
         volumeView = nil
+        volumeSlider = nil
         removeLockObservers()
         onLog?("[车把] 已停用")
     }
@@ -210,21 +233,24 @@ final class HandlebarProbe: @unchecked Sendable {
     /// 否则第一次先憋住，窗口结束没有第二次才判单击。
     /// 注意步进大小随音量区间变化（低位一档 2 格、高位一档 1 格），不能拿步进当双击信号。
     private func handleVolume(direction: Int) {
-        // 无论是否触发手势，都先把音量拨回目标值。
-        restoreToTargetVolume()
-        guard onControl != nil else { return }
+        guard onControl != nil else {
+            // 没有回调（映射为不执行）也要把音量拨回，保持音量基线。
+            restoreToTargetVolume()
+            return
+        }
         let now = Date()
 
         if let last = lastArrow[direction], now.timeIntervalSince(last) < HandlebarMapping.doubleTapWindow {
-            // 双击窗口内的第二次：双击。
+            // 双击窗口内的第二次：双击。判定结束，统一拨回一次。
             cancelPendingSingle(direction)
             lastArrow[direction] = nil
             onLog?("[手势] 与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last) * 1000))ms → 双击（取消单击）")
+            restoreToTargetVolume()
             fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
             return
         }
 
-        // 第一次：可能还是双击的前半段，先延迟单击。
+        // 第一次：憋住不拨回，等双击窗口结束再决定单击/双击。
         lastArrow[direction] = now
         cancelPendingSingle(direction)
         let d = direction
@@ -232,6 +258,8 @@ final class HandlebarProbe: @unchecked Sendable {
             guard let self else { return }
             self.lastArrow[d] = nil
             self.singleDelayTimers[d] = nil
+            // 单击判定结束，拨回一次。
+            self.restoreToTargetVolume()
             guard self.onControl != nil else { return }
             self.onLog?("[手势] 双击窗口结束，无第二次 → 单击")
             self.fire(d > 0 ? .arrowUpShort : .arrowDownShort)
@@ -271,10 +299,6 @@ final class HandlebarProbe: @unchecked Sendable {
             view.setNeedsLayout()
             view.layoutIfNeeded()
             volumeView = view
-            onLog?("[回拨] 挂窗 window=\(window != nil ? "有" : "无") subviews=\(view.subviews.count)")
-            for (i, sub) in view.subviews.enumerated() {
-                onLog?("[回拨]   sub[\(i)] = \(type(of: sub))")
-            }
         }
         guard let view = volumeView else { return nil }
         if let slider = findVolumeSlider(in: view) { return slider }
@@ -287,31 +311,80 @@ final class HandlebarProbe: @unchecked Sendable {
     /// 把系统音量写回用户设定的目标音量。回声在 startVolumeObservation 里按「值匹配」过滤。
     private func restoreToTargetVolume() {
         let target = Self.targetVolume
-        onLog?("[回拨] 拨回目标音量 \(Self.targetVolumePercent)%")
         DispatchQueue.main.async { [weak self] in
             self?.writeVolume(target: target, attempt: 0)
         }
     }
 
-    /// 优先用私有 API 直写媒体音量（车机路径下 MPVolumeView 无 slider，但 AVRCP 绝对音量
-    /// 仍会同步），失败再退回 MPVolumeView（非车机路径）。
+    /// 按用户选择的模式写音量，成功后只打一行结果。
     private func writeVolume(target: Float, attempt: Int) {
-        if setSystemVolume(target) {
-            onLog?("[回拨] 已写入 \(Int(target * 100))%（私有 API）")
-            return
+        let percent = Int(target * 100)
+        switch VolumeRestore.selected {
+        case .auto:
+            if setSystemVolume(target) {
+                onLog?("已写入 \(percent)%（私有 API）"); return
+            }
+            if commitMPVolumeSlider(target) {
+                onLog?("已写入 \(percent)%（MPVolumeSlider）"); return
+            }
+            if commitMPVolumeView(target) {
+                onLog?("已写入 \(percent)%（MPVolumeView）"); return
+            }
+            retryOrFail(target, attempt)
+        case .privateAPI:
+            if setSystemVolume(target) {
+                onLog?("已写入 \(percent)%（私有 API）")
+            } else {
+                retryOrFail(target, attempt)
+            }
+        case .mpVolumeSlider:
+            if commitMPVolumeSlider(target) {
+                onLog?("已写入 \(percent)%（MPVolumeSlider）")
+            } else {
+                retryOrFail(target, attempt)
+            }
+        case .mpVolumeView:
+            if commitMPVolumeView(target) {
+                onLog?("已写入 \(percent)%（MPVolumeView）")
+            } else {
+                retryOrFail(target, attempt)
+            }
         }
-        if let slider = ensureVolumeView() {
-            slider.value = target
-            slider.sendActions(for: .touchUpInside)
-            onLog?("[回拨] 已写入 \(Int(slider.value * 100))%（MPVolumeView）")
-        } else if attempt < 3 {
-            onLog?("[回拨] slider 未就绪，0.3 秒后重试（第 \(attempt + 1) 次）")
+    }
+
+    /// 写失败时 0.3 秒后重试，最多 3 次。
+    private func retryOrFail(_ target: Float, _ attempt: Int) {
+        if attempt < 3 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 self?.writeVolume(target: target, attempt: attempt + 1)
             }
         } else {
-            onLog?("[回拨] 未找到音量 slider，音量可能没有拨回")
+            onLog?("拨回失败（\(VolumeRestore.selected.title)）")
         }
+    }
+
+    /// 直接实例化私有类 MPVolumeSlider 写音量，绕过 MPVolumeView 的「车机路径隐藏滑块」。
+    /// 用 ObjC 运行时 alloc + init 创建（元类型 init(frame:) 因非 required 无法通过编译）。
+    private func commitMPVolumeSlider(_ target: Float) -> Bool {
+        if volumeSlider == nil {
+            guard let cls: AnyClass = NSClassFromString("MPVolumeSlider") else { return false }
+            guard let slider = cls.alloc().perform(NSSelectorFromString("init"))?.takeUnretainedValue() as? UISlider else {
+                return false
+            }
+            volumeSlider = slider
+        }
+        guard let slider = volumeSlider else { return false }
+        slider.value = target
+        slider.sendActions(for: .touchUpInside)
+        return true
+    }
+
+    /// 官方 MPVolumeView 里找 UISlider 写音量。
+    private func commitMPVolumeView(_ target: Float) -> Bool {
+        guard let slider = ensureVolumeView() else { return false }
+        slider.value = target
+        slider.sendActions(for: .touchUpInside)
+        return true
     }
 
     /// 私有 API：AVSystemController 设置系统媒体音量（0~1）。自用，非 App Store。
