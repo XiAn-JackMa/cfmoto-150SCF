@@ -219,10 +219,7 @@ final class HandlebarProbe: @unchecked Sendable {
                 self.onLog?("[音量] 未锁屏：音量键正常调音量（\(Int(new * 100))%），不触发车把")
                 return
             }
-            let steps = abs(new - old)
-            self.record(new > old ? "音量+" : "音量−",
-                        String(format: "%.0f%% → %.0f%%（%.3f，约 %d 格）", old * 100, new * 100, steps,
-                               Int((steps * 16).rounded())))
+            self.record(new > old ? "音量+" : "音量−")
             self.handleVolume(direction: new > old ? 1 : -1)
         }
     }
@@ -278,7 +275,7 @@ final class HandlebarProbe: @unchecked Sendable {
     private func fire(_ gesture: HandlebarGesture) {
         let action = HandlebarMapping.action(for: gesture)
         guard action != .none, let control = action.control else { return }
-        record("→ \(gesture.title) = \(action.title)")
+        record("\(gesture.title) = \(action.title)")
         DispatchQueue.main.async { [weak self] in self?.onControl?(control) }
     }
 
@@ -322,30 +319,30 @@ final class HandlebarProbe: @unchecked Sendable {
         switch VolumeRestore.selected {
         case .auto:
             if setSystemVolume(target) {
-                onLog?("已写入 \(percent)%（私有 API）"); return
+                onLog?("已写入音量 \(percent)%（私有 API）\n"); return
             }
             if commitMPVolumeSlider(target) {
-                onLog?("已写入 \(percent)%（MPVolumeSlider）"); return
+                onLog?("已写入音量 \(percent)%（MPVolumeSlider）\n"); return
             }
             if commitMPVolumeView(target) {
-                onLog?("已写入 \(percent)%（MPVolumeView）"); return
+                onLog?("已写入音量 \(percent)%（MPVolumeView）\n"); return
             }
             retryOrFail(target, attempt)
         case .privateAPI:
             if setSystemVolume(target) {
-                onLog?("已写入 \(percent)%（私有 API）")
+                onLog?("已写入音量 \(percent)%（私有 API）\n")
             } else {
                 retryOrFail(target, attempt)
             }
         case .mpVolumeSlider:
             if commitMPVolumeSlider(target) {
-                onLog?("已写入 \(percent)%（MPVolumeSlider）")
+                onLog?("已写入音量 \(percent)%（MPVolumeSlider）\n")
             } else {
                 retryOrFail(target, attempt)
             }
         case .mpVolumeView:
             if commitMPVolumeView(target) {
-                onLog?("已写入 \(percent)%（MPVolumeView）")
+                onLog?("已写入音量 \(percent)%（MPVolumeView）\n")
             } else {
                 retryOrFail(target, attempt)
             }
@@ -359,7 +356,7 @@ final class HandlebarProbe: @unchecked Sendable {
                 self?.writeVolume(target: target, attempt: attempt + 1)
             }
         } else {
-            onLog?("拨回失败（\(VolumeRestore.selected.title)）")
+            onLog?("拨回失败（\(VolumeRestore.selected.title)）\n")
         }
     }
 
