@@ -43,9 +43,8 @@ jobs:
       - name: Stamp build version
         run: |
           set -euo pipefail
-          # Every run gets its own version, so a downloaded IPA can be told apart at a glance:
-          # short version 1.0.<run>, build number <run>. Both are visible in the app's About page.
-          SHORT="1.0.${{ github.run_number }}"
+          # 固定显示版本为 1.0.86；build number 仍用 run_number 区分每次构建。
+          SHORT="1.0.86"
           BUILD="${{ github.run_number }}"
           echo "APP_VERSION=$SHORT" >> "$GITHUB_ENV"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $SHORT" App/Info.plist
