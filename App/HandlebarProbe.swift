@@ -326,9 +326,9 @@ final class HandlebarProbe: @unchecked Sendable {
     }
 
     /// 私有 API：AVSystemController 设置系统媒体音量（0~1）。自用，非 App Store。
+    /// 实现走 Bridging Header 的 C 函数（NSClassFromString + NSInvocation），避免链接私有符号。
     private func setSystemVolume(_ volume: Float) -> Bool {
-        let controller = AVSystemController.sharedAVSystemController()
-        return controller.setVolumeTo(volume, forCategory: "Audio/Video")
+        return tds_set_system_volume(volume)
     }
 
     private func findVolumeSlider(in view: UIView) -> UISlider? {
