@@ -3580,7 +3580,7 @@ extension ReceiverViewController {
         }, for: .valueChanged)
 
         let carplayHint = UILabel()
-        carplayHint.text = "提示：只有 CarPlay 成功启动后，车把按键才接管音量键；CarPlay 未启动时，音量键仍是普通音量调节。"
+        carplayHint.text = "⚠️ 实验性功能，使用前请先预设目标音量。\n• CarPlay 启动后，音量键映射为功能键：\n• 每次按键后音量拨回固定值（当无法拨回时，可切换拨回方式）\n• 默认「锁屏才生效」，勾选后只在锁屏后映射功能键\n• 双击间隔默认 280ms，可在「双击延迟」调整\n延迟太小，双击无法触发。延迟太大，两次正常单击会变成双击\n• CarPlay 未启动时，音量键仍是普通音量调节\n----抖音:150SCF小马"
         carplayHint.font = .preferredFont(forTextStyle: .footnote)
         carplayHint.textColor = .systemOrange
         carplayHint.numberOfLines = 0
