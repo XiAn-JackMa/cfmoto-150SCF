@@ -114,15 +114,13 @@ final class HandlebarProbe: @unchecked Sendable {
             || !UIApplication.shared.isProtectedDataAvailable
         lock.unlock()
         observeLockState()
-        // 前台时就预创建 MPVolumeView 并挂窗，让内部 slider 先生成；锁屏后台再挂窗
-        // 往往拿不到窗口。延迟到下一轮 runloop，确保 keyWindow 已建立。
+        // 拨回主用私有 API（AVSystemController，车机路径下也能写）；MPVolumeView 仅作
+        // 非车机路径的备用。延迟到下一轮 runloop 备用挂窗。
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if self.ensureVolumeView() != nil {
-                self.onLog?("[车把] 音量拨回视图已就绪")
-            } else {
-                self.onLog?("[车把] 音量拨回视图未就绪：前台挂窗失败，锁屏后将无法拨回")
-            }
+            let hasPrivateAPI = NSClassFromString("AVSystemController") != nil
+            _ = self.ensureVolumeView()
+            self.onLog?("[车把] 拨回方式：私有 API \(hasPrivateAPI ? "可用" : "不可用")，MPVolumeView 备用")
         }
         startVolumeObservation()
         onLog?("[车把] 已启用：锁屏/后台时音量键＝车把按键，目标音量 \(Self.targetVolumePercent)%")
@@ -306,12 +304,17 @@ final class HandlebarProbe: @unchecked Sendable {
         }
     }
 
-    /// slider 是懒生成的，挂窗后可能要等一两轮 runloop 才出现，这里最多延迟重试 3 次。
+    /// 优先用私有 API 直写媒体音量（车机路径下 MPVolumeView 无 slider，但 AVRCP 绝对音量
+    /// 仍会同步），失败再退回 MPVolumeView（非车机路径）。
     private func writeVolume(target: Float, attempt: Int) {
+        if setSystemVolume(target) {
+            onLog?("[回拨] 已写入 \(Int(target * 100))%（私有 API）")
+            return
+        }
         if let slider = ensureVolumeView() {
             slider.value = target
             slider.sendActions(for: .touchUpInside)
-            onLog?("[回拨] 已写入 \(Int(slider.value * 100))%")
+            onLog?("[回拨] 已写入 \(Int(slider.value * 100))%（MPVolumeView）")
         } else if attempt < 3 {
             onLog?("[回拨] slider 未就绪，0.3 秒后重试（第 \(attempt + 1) 次）")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -320,6 +323,12 @@ final class HandlebarProbe: @unchecked Sendable {
         } else {
             onLog?("[回拨] 未找到音量 slider，音量可能没有拨回")
         }
+    }
+
+    /// 私有 API：AVSystemController 设置系统媒体音量（0~1）。自用，非 App Store。
+    private func setSystemVolume(_ volume: Float) -> Bool {
+        let controller = AVSystemController.sharedAVSystemController()
+        return controller.setVolumeTo(volume, forCategory: "Audio/Video")
     }
 
     private func findVolumeSlider(in view: UIView) -> UISlider? {
