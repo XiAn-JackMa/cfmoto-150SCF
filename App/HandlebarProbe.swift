@@ -114,6 +114,16 @@ final class HandlebarProbe: @unchecked Sendable {
             || !UIApplication.shared.isProtectedDataAvailable
         lock.unlock()
         observeLockState()
+        // 前台时就预创建 MPVolumeView 并挂窗，让内部 slider 先生成；锁屏后台再挂窗
+        // 往往拿不到窗口。延迟到下一轮 runloop，确保 keyWindow 已建立。
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.ensureVolumeView() != nil {
+                self.onLog?("[车把] 音量拨回视图已就绪")
+            } else {
+                self.onLog?("[车把] 音量拨回视图未就绪：前台挂窗失败，锁屏后将无法拨回")
+            }
+        }
         startVolumeObservation()
         onLog?("[车把] 已启用：锁屏/后台时音量键＝车把按键，目标音量 \(Self.targetVolumePercent)%")
     }
@@ -164,6 +174,12 @@ final class HandlebarProbe: @unchecked Sendable {
                 guard let self else { return }
                 self.lock.lock(); self.screenLocked = false; self.lock.unlock()
                 self.onLog?("[车把] 已解锁（数据保护）：音量键恢复正常调音量")
+            },
+            // 每次回到前台活跃时，确保拨回用的 MPVolumeView 已就绪（锁屏拨回复用它）。
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                _ = self.ensureVolumeView()
             }
         ]
     }
@@ -253,26 +269,37 @@ final class HandlebarProbe: @unchecked Sendable {
 
     // MARK: 拨回目标音量
 
-    /// 把系统音量写回用户设定的目标音量。用 MPVolumeView 的 slider（官方支持的写音量方式），
-    /// 离屏挂到窗口上复用。回声在 startVolumeObservation 里按「值匹配」过滤。
+    /// 离屏 MPVolumeView 挂到窗口上，返回它内部的 UISlider。slider 是懒生成的，所以
+    /// 尽量在 App 前台时先调用一次（start 里），后台复用同一个实例。
+    private func ensureVolumeView() -> UISlider? {
+        if volumeView == nil {
+            let view = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 100, height: 100))
+            view.alpha = 0.01
+            let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+            let window = scene?.windows.first(where: { $0.isKeyWindow }) ?? scene?.windows.first
+            window?.addSubview(view)
+            view.setNeedsLayout()
+            view.layoutIfNeeded()
+            volumeView = view
+        }
+        guard let view = volumeView else { return nil }
+        if let slider = findVolumeSlider(in: view) { return slider }
+        // slider 可能还没生成，再催一次布局并等下一轮 runloop 重找。
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        return findVolumeSlider(in: view)
+    }
+
+    /// 把系统音量写回用户设定的目标音量。回声在 startVolumeObservation 里按「值匹配」过滤。
     private func restoreToTargetVolume() {
         let target = Self.targetVolume
         onLog?("[回拨] 拨回目标音量 \(Self.targetVolumePercent)%")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if self.volumeView == nil {
-                let view = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 100, height: 100))
-                view.alpha = 0.01
-                let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-                let window = scene?.windows.first(where: { $0.isKeyWindow }) ?? scene?.windows.first
-                window?.addSubview(view)
-                view.setNeedsLayout()
-                view.layoutIfNeeded()
-                self.volumeView = view
-            }
-            if let slider = self.findVolumeSlider(in: self.volumeView!) {
+            if let slider = self.ensureVolumeView() {
                 slider.value = target
                 slider.sendActions(for: .touchUpInside)
+                self.onLog?("[回拨] 已写入 \(Int(slider.value * 100))%")
             } else {
                 self.onLog?("[回拨] 未找到音量 slider，音量可能没有拨回")
             }
