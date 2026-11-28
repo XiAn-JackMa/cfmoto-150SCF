@@ -2847,9 +2847,10 @@ extension ReceiverViewController {
         }, for: .valueChanged)
 
         let slider = handlebarTargetVolumeSlider
-        slider.minimumValue = 1
+        slider.minimumValue = 10
         slider.maximumValue = 100
-        slider.value = Float(HandlebarProbe.targetVolumePercent)
+        let stepped = Int((Float(HandlebarProbe.targetVolumePercent) / 10).rounded()) * 10
+        slider.value = Float(max(10, stepped))
         handlebarTargetVolumeLabel.text = CWL("目标音量：") + "\(Int(slider.value))%"
         handlebarTargetVolumeLabel.font = .preferredFont(forTextStyle: .footnote)
         handlebarTargetVolumeLabel.textColor = .secondaryLabel
@@ -2904,7 +2905,9 @@ extension ReceiverViewController {
     }
 
     private func appendHandlebarLine(_ line: String) {
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        let stamp = formatter.string(from: Date())
         handlebarLines.append("\(stamp)  \(line)")
         if handlebarLines.count > 120 { handlebarLines.removeFirst(handlebarLines.count - 120) }
         if handlebarLogView.window != nil {
@@ -2924,12 +2927,15 @@ extension ReceiverViewController {
     }
 
     @objc private func handlebarTargetVolumeChanged() {
-        handlebarTargetVolumeLabel.text = CWL("目标音量：") + "\(Int(handlebarTargetVolumeSlider.value))%"
+        let stepped = Int((handlebarTargetVolumeSlider.value / 10).rounded()) * 10
+        handlebarTargetVolumeLabel.text = CWL("目标音量：") + "\(stepped)%"
     }
 
     @objc private func handlebarTargetVolumeSaved() {
-        HandlebarProbe.targetVolumePercent = Int(handlebarTargetVolumeSlider.value)
-        handlebarTargetVolumeLabel.text = CWL("目标音量：") + "\(Int(handlebarTargetVolumeSlider.value))%（已保存）"
+        let stepped = max(10, Int((handlebarTargetVolumeSlider.value / 10).rounded()) * 10)
+        handlebarTargetVolumeSlider.value = Float(stepped)
+        HandlebarProbe.targetVolumePercent = stepped
+        handlebarTargetVolumeLabel.text = CWL("目标音量：") + "\(stepped)%（已保存）"
     }
 
     private func aboutLinks() -> [SettingsRow] {

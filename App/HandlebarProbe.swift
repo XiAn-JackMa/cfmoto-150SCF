@@ -182,13 +182,18 @@ final class HandlebarProbe: @unchecked Sendable {
                                object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
                 self.lock.lock(); self.screenLocked = true; self.lock.unlock()
-                self.onLog?("[车把] 已锁屏（数据保护）：音量键开始当作车把按键")
+                // 关闭「锁屏才生效」后，锁屏不再影响行为，这条提示也就不必刷了。
+                if Self.lockOnly {
+                    self.onLog?("[车把] 已锁屏（数据保护）：音量键开始当作车把按键")
+                }
             },
             center.addObserver(forName: UIApplication.protectedDataDidBecomeAvailableNotification,
                                object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
                 self.lock.lock(); self.screenLocked = false; self.lock.unlock()
-                self.onLog?("[车把] 已解锁（数据保护）：音量键恢复正常调音量")
+                if Self.lockOnly {
+                    self.onLog?("[车把] 已解锁（数据保护）：音量键恢复正常调音量")
+                }
             },
             // 每次回到前台活跃时，确保拨回用的 MPVolumeView 已就绪（锁屏拨回复用它）。
             center.addObserver(forName: UIApplication.didBecomeActiveNotification,
@@ -219,7 +224,6 @@ final class HandlebarProbe: @unchecked Sendable {
                 self.onLog?("[音量] 未锁屏：音量键正常调音量（\(Int(new * 100))%），不触发车把")
                 return
             }
-            self.record(new > old ? "音量+" : "音量−")
             self.handleVolume(direction: new > old ? 1 : -1)
         }
     }
@@ -241,7 +245,7 @@ final class HandlebarProbe: @unchecked Sendable {
             // 双击窗口内的第二次：双击。判定结束，统一拨回一次。
             cancelPendingSingle(direction)
             lastArrow[direction] = nil
-            onLog?("[手势] 与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last) * 1000))ms → 双击（取消单击）")
+            onLog?("与上次间隔 \(String(format: "%.0f", now.timeIntervalSince(last) * 1000))ms → 双击")
             restoreToTargetVolume()
             fire(direction > 0 ? .arrowUpDouble : .arrowDownDouble)
             return
@@ -258,12 +262,12 @@ final class HandlebarProbe: @unchecked Sendable {
             // 单击判定结束，拨回一次。
             self.restoreToTargetVolume()
             guard self.onControl != nil else { return }
-            self.onLog?("[手势] 双击窗口结束，无第二次 → 单击")
+            self.onLog?("双击窗口结束，无第二次 → 单击")
             self.fire(d > 0 ? .arrowUpShort : .arrowDownShort)
         }
         RunLoop.main.add(timer, forMode: .common)
         singleDelayTimers[direction] = timer
-        onLog?("[手势] 记录 \(direction > 0 ? "▲" : "▼") 首次按下，等待双击窗口 \(String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000))ms")
+        onLog?("记录 \(direction > 0 ? "▲" : "▼") 首次按下，等待双击窗口 \(String(format: "%.0f", HandlebarMapping.doubleTapWindow * 1000))ms")
     }
 
     private func cancelPendingSingle(_ direction: Int) {
