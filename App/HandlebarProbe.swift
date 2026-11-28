@@ -275,6 +275,7 @@ final class HandlebarProbe: @unchecked Sendable {
         if volumeView == nil {
             let view = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 100, height: 100))
             view.alpha = 0.01
+            view.showsRouteButton = false
             // 优先用旧 API（1.0.83 原版用的）：它在 Scene 与非 Scene 生命周期都返回窗口；
             // connectedScenes.windows 在窗口尚未完全建立时可能为空，导致挂窗失败。
             let window = UIApplication.shared.windows.first(where: { $0.isKeyWindow })
@@ -284,15 +285,16 @@ final class HandlebarProbe: @unchecked Sendable {
             view.layoutIfNeeded()
             volumeView = view
             onLog?("[回拨] 挂窗 window=\(window != nil ? "有" : "无") subviews=\(view.subviews.count)")
+            for (i, sub) in view.subviews.enumerated() {
+                onLog?("[回拨]   sub[\(i)] = \(type(of: sub))")
+            }
         }
         guard let view = volumeView else { return nil }
         if let slider = findVolumeSlider(in: view) { return slider }
         // slider 可能还没生成，再催一次布局后重找。
         view.setNeedsLayout()
         view.layoutIfNeeded()
-        let slider = findVolumeSlider(in: view)
-        onLog?("[回拨] 找 slider \(slider != nil ? "成功" : "失败") subviews=\(view.subviews.count)")
-        return slider
+        return findVolumeSlider(in: view)
     }
 
     /// 把系统音量写回用户设定的目标音量。回声在 startVolumeObservation 里按「值匹配」过滤。
@@ -300,14 +302,23 @@ final class HandlebarProbe: @unchecked Sendable {
         let target = Self.targetVolume
         onLog?("[回拨] 拨回目标音量 \(Self.targetVolumePercent)%")
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            if let slider = self.ensureVolumeView() {
-                slider.value = target
-                slider.sendActions(for: .touchUpInside)
-                self.onLog?("[回拨] 已写入 \(Int(slider.value * 100))%")
-            } else {
-                self.onLog?("[回拨] 未找到音量 slider，音量可能没有拨回")
+            self?.writeVolume(target: target, attempt: 0)
+        }
+    }
+
+    /// slider 是懒生成的，挂窗后可能要等一两轮 runloop 才出现，这里最多延迟重试 3 次。
+    private func writeVolume(target: Float, attempt: Int) {
+        if let slider = ensureVolumeView() {
+            slider.value = target
+            slider.sendActions(for: .touchUpInside)
+            onLog?("[回拨] 已写入 \(Int(slider.value * 100))%")
+        } else if attempt < 3 {
+            onLog?("[回拨] slider 未就绪，0.3 秒后重试（第 \(attempt + 1) 次）")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.writeVolume(target: target, attempt: attempt + 1)
             }
+        } else {
+            onLog?("[回拨] 未找到音量 slider，音量可能没有拨回")
         }
     }
 
