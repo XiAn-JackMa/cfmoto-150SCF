@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           # 固定显示版本为 1.0.86；build number 仍用 run_number 区分每次构建。
-          SHORT="1.0.86"
+          SHORT="1.0.88"
           BUILD="${{ github.run_number }}"
           echo "APP_VERSION=$SHORT" >> "$GITHUB_ENV"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $SHORT" App/Info.plist
