@@ -3206,16 +3206,7 @@ extension ReceiverViewController {
             case .cfmoto:
                 sections = cfmotoOutputSections()
             }
-            return sections + [
-                SettingsSection("支持作者", footer: "觉得好用的话，关注抖音或请作者抽包利群。", [
-                    .externalLink("抖音", icon: ("heart.fill", .systemRed), detail: "关注修改者") {
-                        UIApplication.shared.open(Self.outputAuthorURL)
-                    },
-                    .externalLink("请抽利群", icon: ("cup.and.saucer.fill", .systemOrange), detail: "支付宝") {
-                        UIApplication.shared.open(Self.outputSupportURL)
-                    }
-                ])
-            ]
+            return sections
         }
     }
 
@@ -3315,6 +3306,11 @@ extension ReceiverViewController {
         ipHint.font = .preferredFont(forTextStyle: .footnote)
         ipHint.textColor = .systemOrange
         ipHint.numberOfLines = 0
+        let sponsorHint = UILabel()
+        sponsorHint.text = "下方赞助跟关注的是 修改者150SCF小马"
+        sponsorHint.font = .preferredFont(forTextStyle: .footnote)
+        sponsorHint.textColor = .systemRed
+        sponsorHint.numberOfLines = 0
         return [
             SettingsSection("春风 EasyConn（MotoPlay）",
                 footer: "iPhone 先加入车机热点（如 CFMOTO-5962fb），车机进入投屏待连界面后再启动 CarPlay。" +
@@ -3332,7 +3328,14 @@ extension ReceiverViewController {
                             enabled: cfmotoPortTestPassed) { [weak self] in
                         self?.toggleCfMotoTestPattern()
                     },
-                    .view(ipHint)
+                    .view(ipHint),
+                    .view(sponsorHint),
+                    .externalLink("抖音", icon: ("heart.fill", .systemRed), detail: "关注修改者") {
+                        UIApplication.shared.open(Self.outputAuthorURL)
+                    },
+                    .externalLink("赞助", icon: ("cup.and.saucer.fill", .systemOrange), detail: "请修改者喝瑞幸") {
+                        UIApplication.shared.open(Self.outputSupportURL)
+                    }
                 ]),
             // 「画面参数（手动覆盖）」已隐藏：本分支固定 6 Mbps / 30 fps / Baseline 3.1，静止降节奏关闭。
             SettingsSection("连接状态", footer: "日志同时写入 Documents/CarWithin-easyconn.log，崩溃或强退都不会丢。车边测试推荐直接「分享日志文件」，可 AirDrop / 微信 / 存到「文件」。", [
