@@ -275,19 +275,24 @@ final class HandlebarProbe: @unchecked Sendable {
         if volumeView == nil {
             let view = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 100, height: 100))
             view.alpha = 0.01
-            let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-            let window = scene?.windows.first(where: { $0.isKeyWindow }) ?? scene?.windows.first
+            // 优先用旧 API（1.0.83 原版用的）：它在 Scene 与非 Scene 生命周期都返回窗口；
+            // connectedScenes.windows 在窗口尚未完全建立时可能为空，导致挂窗失败。
+            let window = UIApplication.shared.windows.first(where: { $0.isKeyWindow })
+                ?? UIApplication.shared.windows.first
             window?.addSubview(view)
             view.setNeedsLayout()
             view.layoutIfNeeded()
             volumeView = view
+            onLog?("[回拨] 挂窗 window=\(window != nil ? "有" : "无") subviews=\(view.subviews.count)")
         }
         guard let view = volumeView else { return nil }
         if let slider = findVolumeSlider(in: view) { return slider }
-        // slider 可能还没生成，再催一次布局并等下一轮 runloop 重找。
+        // slider 可能还没生成，再催一次布局后重找。
         view.setNeedsLayout()
         view.layoutIfNeeded()
-        return findVolumeSlider(in: view)
+        let slider = findVolumeSlider(in: view)
+        onLog?("[回拨] 找 slider \(slider != nil ? "成功" : "失败") subviews=\(view.subviews.count)")
+        return slider
     }
 
     /// 把系统音量写回用户设定的目标音量。回声在 startVolumeObservation 里按「值匹配」过滤。
